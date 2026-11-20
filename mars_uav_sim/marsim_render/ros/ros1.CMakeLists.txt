@@ -27,6 +27,8 @@ endif()
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
 
 # Find required packages
+# catkin_package() below needs catkin loaded; the ROS1 build file never found it.
+find_package(catkin REQUIRED COMPONENTS roscpp)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(GLEW REQUIRED)
