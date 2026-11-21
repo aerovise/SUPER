@@ -304,6 +304,9 @@ namespace fsm {
     void Fsm::ChangeState(const string &call_func, const MACHINE_STATE &new_state) {
         fmt::print(fg(fmt::color::green), " -- [Fsm]: [{}] change state from [{}] to [{}].\n", call_func,
                    MACHINE_STATE_STR[int(machine_state_)], MACHINE_STATE_STR[int(new_state)]);
+        if (new_state == FOLLOW_TRAJ || new_state == EMER_STOP || new_state == INIT) {
+            hold_cmd_valid_ = false;
+        }
         machine_state_ = new_state;
     }
 }

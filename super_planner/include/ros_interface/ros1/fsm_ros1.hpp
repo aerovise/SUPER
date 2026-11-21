@@ -132,11 +132,26 @@ namespace fsm {
         }
 
         void getOnePositionCommand(quadrotor_msgs::PositionCommand &pos_cmd, bool &traj_finish) {
-            pos_cmd.trajectory_flag = 0;
             StatePVAJ pvaj;
             double yaw, yaw_dot;
             bool on_backup_traj;
             planner_ptr_->getOneCommandFromTraj(pvaj, yaw, yaw_dot, on_backup_traj, traj_finish);
+            fillPositionCommand(pvaj, yaw, yaw_dot, on_backup_traj, pos_cmd);
+        }
+
+        /// yaw_mode 3 hover command, see pubCmdTimerCallback.
+        void getHoldPositionCommand(quadrotor_msgs::PositionCommand &pos_cmd) {
+            StatePVAJ pvaj;
+            double yaw, yaw_dot;
+            planner_ptr_->getHoldCommand(pvaj, yaw, yaw_dot);
+            // Not added to cmd_logs_: hovering can last indefinitely and the log is kept in memory.
+            fillPositionCommand(pvaj, yaw, yaw_dot, false, pos_cmd, false);
+        }
+
+        void fillPositionCommand(const StatePVAJ &pvaj, const double &yaw, const double &yaw_dot,
+                                 const bool &on_backup_traj, quadrotor_msgs::PositionCommand &pos_cmd,
+                                 const bool &log = true) {
+            pos_cmd.trajectory_flag = 0;
             pos_cmd.header.stamp = ros::Time::now();
             pos_cmd.header.frame_id = "world";
             pos_cmd.position.x = pvaj(0, 0);
@@ -166,7 +181,9 @@ namespace fsm {
             pos_cmd.angular_velocity.z = omg(2);
             pos_cmd.thrust.z = aT;
             latest_cmd = pos_cmd;
-            cmd_logs_.push_back(latest_cmd);
+            if (log) {
+                cmd_logs_.push_back(latest_cmd);
+            }
         }
 
     public:
@@ -240,6 +257,9 @@ namespace fsm {
             getOnePositionCommand(pid_cmd_, traj_finish_);
             if (traj_finish_) {
                 cout << GREEN << " -- [Fsm] Traj finish." << RESET << endl;
+                if (machine_state_ == FOLLOW_TRAJ) {
+                    hold_cmd_valid_ = true;
+                }
                 if (closeToGoal(0.1)) {
                     ChangeState("getPoseFromTraj", WAIT_GOAL);
                 } else {
@@ -335,8 +355,28 @@ namespace fsm {
             pid_cmd_.kv[2] = 4.0;
         }
 
+        /// 100 Hz command output. What the drone is told in each state:
+        /// - INIT: nothing is published; nothing has been planned yet.
+        /// - FOLLOW_TRAJ: the committed trajectory, sampled now (pos_cmd plus a heartbeat on
+        ///   mpc_cmd_topic). With yaw_mode 3, yaw and yaw_dot come from look-at.
+        /// - EMER_STOP: as FOLLOW_TRAJ (upstream: the committed trajectory, which contains the
+        ///   backup/stop segment), for the one FSM tick before it changes to WAIT_GOAL.
+        /// - WAIT_GOAL after a trajectory was flown to its end (directly, or via GENERATE_TRAJ
+        ///   finding the drone already at the goal), yaw_mode 3 only:
+        ///   a hover command at the trajectory's final point with zero velocity, acceleration
+        ///   and jerk, with the look-at yaw, or the last commanded yaw held once the target is
+        ///   stale. Only pos_cmd; nothing on mpc_cmd_topic.
+        /// - WAIT_GOAL otherwise (after EMER_STOP, an invalid goal, or with yaw_mode 1/2), and
+        ///   GENERATE_TRAJ: nothing is published (upstream); the controller keeps its last
+        ///   setpoint. The hover command is not sent after EMER_STOP, because there the
+        ///   trajectory's final point is not where the drone stopped.
         void pubCmdTimerCallback(const ros::TimerEvent &event) {
             if (stop) {
+                return;
+            }
+            if (machine_state_ == WAIT_GOAL && hold_cmd_valid_ && planner_ptr_->yawToPointEnabled()) {
+                getHoldPositionCommand(pid_cmd_);
+                cmd_pub.publish(pid_cmd_);
                 return;
             }
             if (machine_state_ != FOLLOW_TRAJ && machine_state_ != EMER_STOP) {
@@ -351,6 +391,9 @@ namespace fsm {
             cmd_pub.publish(pid_cmd_);
             if (traj_finish_) {
                 cout << GREEN << " -- [Fsm] Traj finish." << RESET << endl;
+                if (machine_state_ == FOLLOW_TRAJ) {
+                    hold_cmd_valid_ = true;
+                }
                 if (closeToGoal(0.1)) {
                     ChangeState("PubCmdCallback", WAIT_GOAL);
                 } else {

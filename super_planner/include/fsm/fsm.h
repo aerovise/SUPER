@@ -27,6 +27,7 @@
 #include <queue>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <fstream>
 #include <fmt/color.h>
 #include <cereal/archives/binary_file_handler.hpp>
@@ -160,6 +161,14 @@ namespace fsm {
         double system_start_time_;
 
         bool traj_finish_{false};
+
+        // True once the committed trajectory has been flown to its end in FOLLOW_TRAJ (set by the
+        // command output when it sees traj_finish), so the drone rests at its final point. It
+        // survives FOLLOW_TRAJ -> GENERATE_TRAJ -> WAIT_GOAL (upstream's path when the end is
+        // 0.1 m or more from the goal) and is cleared on entering FOLLOW_TRAJ (a new trajectory),
+        // EMER_STOP or INIT (ChangeState). Gates the yaw_mode 3 hover command in WAIT_GOAL
+        // (FsmRos1::pubCmdTimerCallback).
+        std::atomic<bool> hold_cmd_valid_{false};
 
         void WriteTimeToLog();
 
