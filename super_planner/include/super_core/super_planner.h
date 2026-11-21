@@ -99,19 +99,26 @@ namespace super_planner {
         vector<double> time_consuming_;
 
         /* yaw_mode 3 (look at a point) */
-        // Below this horizontal distance [m] to the target the bearing is undefined (target
-        // above/below the drone): the commanded yaw is held.
-        static constexpr double kLookAtMinHorizontalDis = 0.1;
-        // Cap on the time step [s] of the yaw rate limiter, so a gap between commands (e.g. while
-        // in WAIT_GOAL) does not turn into one large yaw step.
+        // Near the target horizontally the bearing is undefined (target above/below the drone)
+        // or jumps with a few cm of noise: the commanded yaw is held. Hysteresis: the hold starts
+        // below the enter distance [m] and ends above the leave distance [m].
+        static constexpr double kLookAtHoldEnterDis = 0.1;
+        static constexpr double kLookAtHoldLeaveDis = 0.2;
+        // Cap on the time step [s] of the yaw rate limiter, so a gap between commands does not
+        // turn into one large yaw step.
         static constexpr double kLookAtMaxDt = 0.05;
+        // A target stamped more than this [s] in the future is rejected, and a clock jump back by
+        // more than this drops the stored target (sim or bag clock reset).
+        static constexpr double kYawTargetMaxFuture = 0.5;
         std::mutex yaw_target_mutex_;
         Vec3f yaw_target_p_{0, 0, 0};
-        double yaw_target_WT_{-1};  // < 0: no target received yet
-        double look_at_yaw_{NAN};   // last commanded yaw; NAN until the first command
+        double yaw_target_WT_{-1};  // < 0: no target
+        double look_at_yaw_{NAN};   // last commanded yaw, continuous (not wrapped); NAN until the first command
         double look_at_last_WT_{-1};
+        bool look_at_hold_{false};  // inside the hold radius (hysteresis state)
 
-        void applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, double &yaw, double &yaw_dot);
+        void applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, const bool &hold_fallback,
+                            double &yaw, double &yaw_dot);
 
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -139,9 +146,15 @@ namespace super_planner {
         }
 
         /// yaw_mode 3: set the world-frame point the commanded yaw looks at. stamp_WT is the
-        /// target's time [s] (same clock as RosInterface::getSimTime); a future stamp is clamped
-        /// to now. Non-finite points are ignored.
+        /// target's time [s] (same clock as RosInterface::getSimTime). A stamp up to
+        /// kYawTargetMaxFuture in the future is clamped to now; later ones, and non-finite
+        /// points, are ignored.
         void setYawTarget(const Vec3f &p, const double &stamp_WT);
+
+        /// yaw_mode 3 hover command after a finished trajectory: the final point of the committed
+        /// trajectory with zero velocity, acceleration and jerk, and the look-at yaw. Without a
+        /// fresh target the last commanded yaw is held (yaw_dot 0).
+        void getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot);
 
         typedef std::shared_ptr<SuperPlanner> Ptr;
 

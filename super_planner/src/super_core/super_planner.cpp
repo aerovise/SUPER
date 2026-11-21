@@ -35,6 +35,20 @@ namespace super_planner {
              const rog_map::ROGMapROS::Ptr &map_ptr
             ) : cfg_(Config(cfg_path)), ros_ptr_(ros_ptr), map_ptr_(map_ptr) {
 
+        // Fail loudly on unusable yaw limits instead of guessing a value: yaw_dot_max <= 0 freezes
+        // or inverts the yaw limiter (and divides by zero in YawTrajOpt), yaw_target_timeout <= 0
+        // silently disables yaw_mode 3. "!(x > 0)" also catches NaN.
+        if (!(cfg_.yaw_dot_max > 0) || !(cfg_.yaw_target_timeout > 0)) {
+            ros_ptr_->fatal(" -- [SUPER] invalid config: super_planner/yaw_dot_max = {} and "
+                            "super_planner/yaw_target_timeout = {} must both be > 0. Exiting.",
+                            cfg_.yaw_dot_max, cfg_.yaw_target_timeout);
+            // _Exit, not exit: exit() would run the global FsmRos1 destructor, which calls exit(0)
+            // itself and turns this into a clean exit code.
+            std::cout.flush();
+            std::fflush(stdout);
+            std::_Exit(EXIT_FAILURE);
+        }
+
         ros_ptr_->setResolution(cfg_.resolution);
         ros_ptr_->setVisualizationEn(cfg_.visualization_en);
         exp_traj_opt_ = std::make_shared<traj_opt::ExpTrajOpt>(cfg_.exp_traj_cfg, ros_ptr_);
@@ -369,36 +383,62 @@ namespace super_planner {
         cmd_traj_info_.unlock();
 
         if (cfg_.yaw_mode == Config::YAW_TO_POINT) {
-            applyLookAtYaw(pvaj.col(0), cur_t, yaw, yaw_dot);
+            applyLookAtYaw(pvaj.col(0), cur_t, false, yaw, yaw_dot);
         }
+    }
+
+    void SuperPlanner::getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot) {
+        cmd_traj_info_.lock();
+        const double total_dur = cmd_traj_info_.getTotalDuration();
+        pvaj = cmd_traj_info_.posTraj().getState(total_dur);
+        yaw = cmd_traj_info_.getYaw(total_dur)[0];
+        cmd_traj_info_.unlock();
+        pvaj.rightCols(3).setZero();
+        yaw_dot = 0;
+        if (std::isnan(yaw)) {
+            yaw = std::isnan(look_at_yaw_) ? 0.0 : look_at_yaw_;
+        }
+        applyLookAtYaw(pvaj.col(0), ros_ptr_->getSimTime(), true, yaw, yaw_dot);
     }
 
     void SuperPlanner::setYawTarget(const Vec3f &p, const double &stamp_WT) {
         if (!p.allFinite() || !std::isfinite(stamp_WT)) {
             return;
         }
+        const double now = ros_ptr_->getSimTime();
+        if (stamp_WT - now > kYawTargetMaxFuture) {
+            ros_ptr_->warn(" -- [SUPER] yaw target stamped {:.3f} s in the future, ignored.", stamp_WT - now);
+            return;
+        }
         std::lock_guard<std::mutex> lck(yaw_target_mutex_);
         yaw_target_p_ = p;
-        yaw_target_WT_ = std::min(stamp_WT, ros_ptr_->getSimTime());
+        yaw_target_WT_ = std::min(stamp_WT, now);
     }
 
     /// yaw_mode 3. Replaces the trajectory yaw (yaw, yaw_dot: in = trajectory, out = command).
     /// The bearing is taken from the commanded position cmd_p, which is where the drone is told
     /// to be together with this yaw.
     /// - Fresh target (received, and no older than yaw_target_timeout): the desired yaw is the
-    ///   horizontal bearing to it. Within kLookAtMinHorizontalDis horizontally (incl. straight
-    ///   above/below) the current commanded yaw is held, so there is no NaN.
-    /// - Fallback (no target yet, or stale): the desired yaw is the trajectory yaw, i.e. the
-    ///   upstream behaviour (heading along the trajectory). The commanded yaw turns back to it
-    ///   at the rate limit and, once it has caught up, equals the trajectory yaw and yaw_dot
-    ///   exactly. A fresh target resumes look-at. The fallback only changes yaw, never position.
-    /// The commanded yaw moves toward the desired yaw at most yaw_dot_max * dt per call, and
-    /// stays continuous (not wrapped), like the trajectory yaw.
-    void SuperPlanner::applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, double &yaw, double &yaw_dot) {
+    ///   horizontal bearing to it. Within kLookAtHoldEnterDis horizontally (incl. straight
+    ///   above/below) the current commanded yaw is held, until the target is farther than
+    ///   kLookAtHoldLeaveDis; so there is no NaN and no jitter at the edge.
+    /// - Fallback (no target yet, stale, or dropped after a backward clock jump):
+    ///   - while following a trajectory (hold_fallback false): the desired yaw is the trajectory
+    ///     yaw, i.e. the upstream behaviour (heading along the trajectory, goal yaw at its end).
+    ///     The command turns back to it at the rate limit and, once caught up, equals the
+    ///     trajectory yaw (mod 2*pi) and its yaw_dot.
+    ///   - while hovering after a trajectory (hold_fallback true): the last commanded yaw is held
+    ///     with yaw_dot 0.
+    ///   A fresh target resumes look-at. The fallback only changes yaw, never position.
+    /// The commanded yaw moves toward the desired yaw at most yaw_dot_max * dt per call. The
+    /// internal state stays continuous; only the returned yaw is wrapped to [-pi, pi].
+    void SuperPlanner::applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, const bool &hold_fallback,
+                                      double &yaw, double &yaw_dot) {
         if (std::isnan(look_at_yaw_)) {
             look_at_yaw_ = yaw;
             look_at_last_WT_ = cur_WT;
         }
+        const bool clock_jumped_back = cur_WT < look_at_last_WT_ - kYawTargetMaxFuture;
         const double dt = std::min(std::max(cur_WT - look_at_last_WT_, 0.0), kLookAtMaxDt);
         look_at_last_WT_ = cur_WT;
 
@@ -406,6 +446,13 @@ namespace super_planner {
         double target_WT;
         {
             std::lock_guard<std::mutex> lck(yaw_target_mutex_);
+            // After a large backward clock jump, or for a target now far in the future, the stored
+            // stamp no longer means anything: drop it, which ends in the fallback.
+            if (yaw_target_WT_ >= 0 &&
+                (clock_jumped_back || cur_WT - yaw_target_WT_ < -kYawTargetMaxFuture)) {
+                yaw_target_WT_ = -1;
+                ros_ptr_->warn(" -- [SUPER] yaw target stamp invalid after a clock jump, target dropped.");
+            }
             target_p = yaw_target_p_;
             target_WT = yaw_target_WT_;
         }
@@ -415,7 +462,17 @@ namespace super_planner {
         if (fresh) {
             const Vec3f d = target_p - cmd_p;
             const double horizontal_dis = std::hypot(d.x(), d.y());
-            desired_yaw = horizontal_dis < kLookAtMinHorizontalDis ? look_at_yaw_ : std::atan2(d.y(), d.x());
+            if (horizontal_dis < kLookAtHoldEnterDis) {
+                look_at_hold_ = true;
+            } else if (horizontal_dis > kLookAtHoldLeaveDis) {
+                look_at_hold_ = false;
+            }
+            desired_yaw = look_at_hold_ ? look_at_yaw_ : std::atan2(d.y(), d.x());
+        } else {
+            look_at_hold_ = false;
+            if (hold_fallback) {
+                desired_yaw = look_at_yaw_;
+            }
         }
         geometry_utils::normalizeNextYaw(look_at_yaw_, desired_yaw);
 
@@ -423,7 +480,7 @@ namespace super_planner {
         const double max_step = cfg_.yaw_dot_max * dt;
         if (std::abs(err) <= max_step) {
             look_at_yaw_ = desired_yaw;
-            if (fresh) {
+            if (fresh || hold_fallback) {
                 yaw_dot = dt > 0 ? err / dt : 0.0;
             }
             // else: caught up with the trajectory, keep its yaw_dot as feed-forward.
@@ -431,7 +488,7 @@ namespace super_planner {
             look_at_yaw_ += std::copysign(max_step, err);
             yaw_dot = std::copysign(cfg_.yaw_dot_max, err);
         }
-        yaw = look_at_yaw_;
+        yaw = std::remainder(look_at_yaw_, 2 * M_PI);
     }
 
 
