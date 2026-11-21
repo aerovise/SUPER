@@ -51,8 +51,19 @@ namespace fsm {
             return;
         }
 
-        if (finish_plan) {
-            return;
+        Vec3f goal_p;
+        double goal_yaw;
+        bool new_goal;
+        uint64_t seq;
+        {
+            std::lock_guard<std::mutex> lck(goal_mutex_);
+            if (finish_plan) {
+                return;
+            }
+            goal_p = gi_.goal_p;
+            goal_yaw = gi_.goal_yaw;
+            new_goal = gi_.new_goal;
+            seq = goal_seq_;
         }
 
         if (plan_from_rest_) {
@@ -60,11 +71,18 @@ namespace fsm {
             return;
         }
 
-        planner_ptr_->getMap()->getNearestInfCellNot(GridType::OCCUPIED, gi_.goal_p, gi_.goal_p, 3.0);
+        // Snap the local copy (upstream snapped gi_.goal_p in place, racing the goal callback).
+        planner_ptr_->getMap()->getNearestInfCellNot(GridType::OCCUPIED, goal_p, goal_p, 3.0);
+        {
+            std::lock_guard<std::mutex> lck(goal_mutex_);
+            if (seq == goal_seq_) {
+                gi_.goal_p = goal_p;
+            }
+        }
 
         TimeConsuming replan_once_time("replan_once_time", false);
 
-        RET_CODE ret_code = planner_ptr_->ReplanOnce(gi_.goal_p, gi_.goal_yaw, gi_.new_goal);
+        RET_CODE ret_code = planner_ptr_->ReplanOnce(goal_p, goal_yaw, new_goal);
         if (ret_code == FAILED) {
 //            cout << YELLOW << " -- [Fsm] ReplanOnce failed." << RESET << endl;
         } else { cout << GREEN << " -- [Fsm] ReplanOnce succeed." << RESET << endl; }
@@ -74,7 +92,12 @@ namespace fsm {
         } else if (ret_code == NEW_TRAJ) {
             ChangeState("ReplanTimerCallback", GENERATE_TRAJ);
         } else if (ret_code == SUCCESS || ret_code == FINISH) {
-            gi_.new_goal = false;
+            {
+                std::lock_guard<std::mutex> lck(goal_mutex_);
+                if (seq == goal_seq_) {
+                    gi_.new_goal = false;
+                }
+            }
             publishPolyTraj();
         }
 
@@ -121,7 +144,12 @@ namespace fsm {
                 break;
             }
             case WAIT_GOAL: {
-                if (!gi_.new_goal) {
+                bool new_goal;
+                {
+                    std::lock_guard<std::mutex> lck(goal_mutex_);
+                    new_goal = gi_.new_goal;
+                }
+                if (!new_goal) {
                     return;
                 } else {
                     ChangeState("MainFsmCallback", GENERATE_TRAJ);
@@ -130,24 +158,40 @@ namespace fsm {
                 break;
             }
             case GENERATE_TRAJ: {
-                if (closeToGoal(0.1)) {
-                    ChangeState("MainFsmCallback", WAIT_GOAL);
-                    gi_.new_goal = false;
-                    finish_plan = true;
+                Vec3f goal_p;
+                double goal_yaw;
+                bool new_goal;
+                uint64_t seq;
+                {
+                    std::lock_guard<std::mutex> lck(goal_mutex_);
+                    goal_p = gi_.goal_p;
+                    goal_yaw = gi_.goal_yaw;
+                    new_goal = gi_.new_goal;
+                    seq = goal_seq_;
+                }
+                if ((robot_state_.p - goal_p).norm() < 0.1) {
+                    std::lock_guard<std::mutex> lck(goal_mutex_);
+                    if (seq == goal_seq_) {
+                        ChangeState("MainFsmCallback", WAIT_GOAL);
+                        gi_.new_goal = false;
+                        finish_plan = true;
+                    }
                     return;
                 }
-                int retcode = planner_ptr_->PlanFromRest(gi_.goal_p, gi_.goal_yaw, gi_.new_goal);
+                int retcode = planner_ptr_->PlanFromRest(goal_p, goal_yaw, new_goal);
                 if (!planner_ptr_->goalValid()) {
                     cout << YELLOW << " -- [Fsm] Goal is invalid, skip this goal." << RESET << endl;
                     ChangeState("MainFsmCallback", WAIT_GOAL);
                     return;
                 }
                 if (retcode == SUCCESS || retcode == FINISH) {
-                    gi_.new_goal = false;
                     plan_from_rest_ = true;
-                    finish_plan = false;
-                    if (retcode == FINISH) {
-                        finish_plan = true;
+                    {
+                        std::lock_guard<std::mutex> lck(goal_mutex_);
+                        if (seq == goal_seq_) {
+                            gi_.new_goal = false;
+                            finish_plan = retcode == FINISH;
+                        }
                     }
 
                     publishPolyTraj();
@@ -177,6 +221,7 @@ namespace fsm {
         /// The close to goal should consider the the local shift
         /// All goal should be in the known free on inf map.
         /// The intermedia points should be in free space.
+        std::lock_guard<std::mutex> lck(goal_mutex_);
         double dis = (robot_state_.p - gi_.goal_p).norm();
         return dis < thresh_dis;
     }
@@ -208,6 +253,10 @@ namespace fsm {
         }
         const bool hold = flying && near_robot;
 
+        // Held to the end: gi_, finish_plan and goal_seq_ change together (see goal_mutex_).
+        // closeToGoal() also takes goal_mutex_, so it is not called below.
+        std::lock_guard<std::mutex> lck(goal_mutex_);
+
         // Moving-goal gate. While the current goal is being flown to, or has been reached, a goal
         // within regoal_dist of it is ignored entirely (goal, yaw and new_goal untouched), so a
         // 10 Hz goal stream that barely moves forces no replans (an accepted goal sets new_goal,
@@ -217,7 +266,8 @@ namespace fsm {
         // accepted goal, so slow drift is accepted once it adds up past regoal_dist. Not gated:
         // the first goal, and WAIT_GOAL away from the goal (after an invalid goal or an
         // emergency stop), so a repeated goal there retries planning, and hold requests.
-        const bool goal_active = flying || (machine_state_ == WAIT_GOAL && closeToGoal(cfg_.regoal_dist));
+        const bool goal_active = flying || (machine_state_ == WAIT_GOAL &&
+                                            (robot_state_.p - gi_.goal_p).norm() < cfg_.regoal_dist);
         if (!hold && started_ && goal_active && (click_point - gi_.click_p).norm() <= cfg_.regoal_dist) {
             return;
         }
@@ -248,6 +298,7 @@ namespace fsm {
         // finish_plan (set when PlanFromRest already reached the goal) stops callReplanOnce. The
         // goal has moved, so resume replanning toward it.
         finish_plan = false;
+        goal_seq_++;
     }
 
     void Fsm::ChangeState(const string &call_func, const MACHINE_STATE &new_state) {

@@ -26,6 +26,7 @@
 
 #include <queue>
 #include <memory>
+#include <mutex>
 #include <fstream>
 #include <fmt/color.h>
 #include <cereal/archives/binary_file_handler.hpp>
@@ -69,6 +70,15 @@ namespace fsm {
             double goal_yaw;
             Vec3f click_p;  // last accepted goal as received (before snapping), for the regoal_dist gate
         } gi_;
+
+        // Goal race: the goal callback and the FSM/replan timers run on different threads
+        // (ROS1 AsyncSpinner(0), ROS2 separate callback groups). goal_mutex_ guards gi_,
+        // finish_plan and goal_seq_. Planning works on a locked copy of the goal; results
+        // (snapped goal, new_goal = false, finish_plan) are written back only if goal_seq_ is
+        // unchanged, so a goal accepted meanwhile is never overwritten by the old one. Without
+        // this, the regoal_dist gate would ignore the follow-up messages that used to repair it.
+        std::mutex goal_mutex_;
+        uint64_t goal_seq_{0};
 
         Eigen::Vector3d auto_pilot_vel_w_;
 
