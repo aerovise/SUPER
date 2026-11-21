@@ -51,6 +51,8 @@ namespace fsm {
 
         bool click_yaw_en{};
         string cmd_topic, mpc_cmd_topic, click_goal_topic;
+        // geometry_msgs/PointStamped (world frame) the yaw looks at; subscribed only with super_planner/yaw_mode 3.
+        string yaw_target_topic;
         double yaw_dot_max{};
 
         Config() = default;
@@ -67,6 +69,7 @@ namespace fsm {
             loader.LoadParam("fsm/cmd_topic", cmd_topic, string("/planning/pos_cmd"));
             loader.LoadParam("fsm/mpc_cmd_topic", mpc_cmd_topic, string("/planning_cmd/mpc"));
             loader.LoadParam("fsm/click_goal_topic", click_goal_topic, string("/planning/click_goal_topic"));
+            loader.LoadParam("fsm/yaw_target_topic", yaw_target_topic, string("/planning/yaw_target"));
 
 
             loader.LoadParam("super_planner/yaw_dot_max", yaw_dot_max, 1.0, true);

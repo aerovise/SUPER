@@ -31,6 +31,7 @@
 
 #include "ros/ros.h"
 #include "geometry_msgs/PoseStamped.h"
+#include "geometry_msgs/PointStamped.h"
 #include "nav_msgs/Path.h"
 #include "nav_msgs/Odometry.h"
 #include "quadrotor_msgs/PositionCommand.h"
@@ -40,7 +41,7 @@
 namespace fsm {
     class FsmRos1 : public Fsm {
         ros::NodeHandle nh_;
-        ros::Subscriber goal_sub_;
+        ros::Subscriber goal_sub_, yaw_target_sub_;
         ros::Publisher cmd_pub, mpc_cmd_pub_, path_pub_;
         ros::Timer execution_timer_, replan_timer_, cmd_timer_;
         quadrotor_msgs::PositionCommand pid_cmd_;
@@ -270,6 +271,12 @@ namespace fsm {
             setGoalPosiAndYaw(goal_p, goal_q);
         }
 
+        void yawTargetCallback(const geometry_msgs::PointStampedConstPtr &msg) {
+            // A zero stamp means "now". Staleness is judged in SuperPlanner::applyLookAtYaw.
+            const double stamp = msg->header.stamp.isZero() ? ros::Time::now().toSec() : msg->header.stamp.toSec();
+            planner_ptr_->setYawTarget(Vec3f{msg->point.x, msg->point.y, msg->point.z}, stamp);
+        }
+
         void init(const ros::NodeHandle &nh, const std::string &cfg_path) {
             // 初始化参数读取
             nh_ = nh;
@@ -288,6 +295,11 @@ namespace fsm {
                 goal_sub_ = nh_.subscribe(cfg_.click_goal_topic, 1, &FsmRos1::goalCallback, this);
                 cout << YELLOW << " -- [Fsm] CLICKGOAL ENABLE." << RESET << endl;
                 cmd_cnt++;
+            }
+
+            if (planner_ptr_->yawToPointEnabled()) {
+                yaw_target_sub_ = nh_.subscribe(cfg_.yaw_target_topic, 1, &FsmRos1::yawTargetCallback, this);
+                cout << YELLOW << " -- [Fsm] YAW TO POINT ENABLE, target topic: " << cfg_.yaw_target_topic << RESET << endl;
             }
 
             if (cmd_cnt != 1) {

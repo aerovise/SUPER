@@ -367,6 +367,71 @@ namespace super_planner {
 
 //        double cur_yaw = geometry_utils::get_yaw_from_quaternion(robot_state_.q);
         cmd_traj_info_.unlock();
+
+        if (cfg_.yaw_mode == Config::YAW_TO_POINT) {
+            applyLookAtYaw(pvaj.col(0), cur_t, yaw, yaw_dot);
+        }
+    }
+
+    void SuperPlanner::setYawTarget(const Vec3f &p, const double &stamp_WT) {
+        if (!p.allFinite() || !std::isfinite(stamp_WT)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lck(yaw_target_mutex_);
+        yaw_target_p_ = p;
+        yaw_target_WT_ = std::min(stamp_WT, ros_ptr_->getSimTime());
+    }
+
+    /// yaw_mode 3. Replaces the trajectory yaw (yaw, yaw_dot: in = trajectory, out = command).
+    /// The bearing is taken from the commanded position cmd_p, which is where the drone is told
+    /// to be together with this yaw.
+    /// - Fresh target (received, and no older than yaw_target_timeout): the desired yaw is the
+    ///   horizontal bearing to it. Within kLookAtMinHorizontalDis horizontally (incl. straight
+    ///   above/below) the current commanded yaw is held, so there is no NaN.
+    /// - Fallback (no target yet, or stale): the desired yaw is the trajectory yaw, i.e. the
+    ///   upstream behaviour (heading along the trajectory). The commanded yaw turns back to it
+    ///   at the rate limit and, once it has caught up, equals the trajectory yaw and yaw_dot
+    ///   exactly. A fresh target resumes look-at. The fallback only changes yaw, never position.
+    /// The commanded yaw moves toward the desired yaw at most yaw_dot_max * dt per call, and
+    /// stays continuous (not wrapped), like the trajectory yaw.
+    void SuperPlanner::applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, double &yaw, double &yaw_dot) {
+        if (std::isnan(look_at_yaw_)) {
+            look_at_yaw_ = yaw;
+            look_at_last_WT_ = cur_WT;
+        }
+        const double dt = std::min(std::max(cur_WT - look_at_last_WT_, 0.0), kLookAtMaxDt);
+        look_at_last_WT_ = cur_WT;
+
+        Vec3f target_p;
+        double target_WT;
+        {
+            std::lock_guard<std::mutex> lck(yaw_target_mutex_);
+            target_p = yaw_target_p_;
+            target_WT = yaw_target_WT_;
+        }
+        const bool fresh = target_WT >= 0 && (cur_WT - target_WT) <= cfg_.yaw_target_timeout;
+
+        double desired_yaw = yaw;
+        if (fresh) {
+            const Vec3f d = target_p - cmd_p;
+            const double horizontal_dis = std::hypot(d.x(), d.y());
+            desired_yaw = horizontal_dis < kLookAtMinHorizontalDis ? look_at_yaw_ : std::atan2(d.y(), d.x());
+        }
+        geometry_utils::normalizeNextYaw(look_at_yaw_, desired_yaw);
+
+        const double err = desired_yaw - look_at_yaw_;
+        const double max_step = cfg_.yaw_dot_max * dt;
+        if (std::abs(err) <= max_step) {
+            look_at_yaw_ = desired_yaw;
+            if (fresh) {
+                yaw_dot = dt > 0 ? err / dt : 0.0;
+            }
+            // else: caught up with the trajectory, keep its yaw_dot as feed-forward.
+        } else {
+            look_at_yaw_ += std::copysign(max_step, err);
+            yaw_dot = std::copysign(cfg_.yaw_dot_max, err);
+        }
+        yaw = look_at_yaw_;
     }
 
 

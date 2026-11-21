@@ -98,6 +98,21 @@ namespace super_planner {
 
         vector<double> time_consuming_;
 
+        /* yaw_mode 3 (look at a point) */
+        // Below this horizontal distance [m] to the target the bearing is undefined (target
+        // above/below the drone): the commanded yaw is held.
+        static constexpr double kLookAtMinHorizontalDis = 0.1;
+        // Cap on the time step [s] of the yaw rate limiter, so a gap between commands (e.g. while
+        // in WAIT_GOAL) does not turn into one large yaw step.
+        static constexpr double kLookAtMaxDt = 0.05;
+        std::mutex yaw_target_mutex_;
+        Vec3f yaw_target_p_{0, 0, 0};
+        double yaw_target_WT_{-1};  // < 0: no target received yet
+        double look_at_yaw_{NAN};   // last commanded yaw; NAN until the first command
+        double look_at_last_WT_{-1};
+
+        void applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, double &yaw, double &yaw_dot);
+
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -118,6 +133,15 @@ namespace super_planner {
         bool goalValid() const {
             return gi_.goal_valid;
         }
+
+        bool yawToPointEnabled() const {
+            return cfg_.yaw_mode == Config::YAW_TO_POINT;
+        }
+
+        /// yaw_mode 3: set the world-frame point the commanded yaw looks at. stamp_WT is the
+        /// target's time [s] (same clock as RosInterface::getSimTime); a future stamp is clamped
+        /// to now. Non-finite points are ignored.
+        void setYawTarget(const Vec3f &p, const double &stamp_WT);
 
         typedef std::shared_ptr<SuperPlanner> Ptr;
 

@@ -38,7 +38,10 @@ namespace super_planner {
     public:
         enum YawMode{
             YAW_TO_VEL = 1,
-            YAW_TO_GOAL = 2
+            YAW_TO_GOAL = 2,
+            // Look at the latest yaw target point (SuperPlanner::setYawTarget); see
+            // SuperPlanner::applyLookAtYaw for the fallback.
+            YAW_TO_POINT = 3
         };
 
         traj_opt::Config exp_traj_cfg, back_traj_cfg;
@@ -70,8 +73,10 @@ namespace super_planner {
         int mpc_horizon{};
 
         double yaw_dot_max;
-        // Yaw mode: 1 heading to velocity, 2 heading to goal
+        // Yaw mode: 1 heading to velocity, 2 heading to goal, 3 look at the yaw target point
         int yaw_mode = YAW_TO_VEL;
+        // yaw_mode 3: a yaw target older than this [s] is stale, and the yaw falls back to the trajectory heading.
+        double yaw_target_timeout;
 
         rog_map::vec_E<rog_map::Vec3i> seed_line_neighbour;
 
@@ -103,6 +108,7 @@ namespace super_planner {
             loader.LoadParam("super_planner/yaw_mode", yaw_mode, 1);
             loader.LoadParam("super_planner/mpc_horizon", mpc_horizon, 1);
             loader.LoadParam("super_planner/yaw_dot_max", yaw_dot_max, 3.14);
+            loader.LoadParam("super_planner/yaw_target_timeout", yaw_target_timeout, 1.0);
 
             loader.LoadParam("rog_map/resolution", resolution, 0.01, true);
 
