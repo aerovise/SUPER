@@ -38,11 +38,16 @@ super_planner:
   receding_dis: 4.0
   robot_r: 0.2
   yaw_dot_max: 3.0
-  # Yaw mode: 1 heading to velocity, 2 heading to goal, 3 look at the yaw target point
+  # tracker-drone: added mode 3. Yaw mode: 1 heading to velocity, 2 heading to goal, 3 look at the yaw target point
   # tracker-drone: 3, look at the target (was 1). The yaw still respects yaw_dot_max.
+  # tracker-drone: yaw_mode 3 only changes /planning/pos_cmd (quadrotor_msgs/PositionCommand, cmd_topic). The
+  # polynomial trajectory on mpc_cmd_topic keeps the planned trajectory yaw, so the controller
+  # must track cmd_topic. After a trajectory ends at the goal, pos_cmd keeps coming at 100 Hz as a
+  # hover command (final point, zero velocity) carrying the look-at yaw.
   yaw_mode: 3
-  # tracker-drone: new. A yaw target older than this [s] (or none yet) falls back to the trajectory
-  # heading (yaw_mode 1 behaviour), turning back at yaw_dot_max; position is never affected.
+  # tracker-drone: new. A yaw target older than this [s] (or none yet) falls back: while flying,
+  # to the trajectory yaw (yaw_mode 1 behaviour, ending at the goal yaw), turning back at
+  # yaw_dot_max; while hovering, the last yaw is held. Position is never affected. Must be > 0.
   yaw_target_timeout: 1.0
   mpc_horizon: 15
 
