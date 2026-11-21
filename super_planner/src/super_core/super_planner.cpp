@@ -387,13 +387,18 @@ namespace super_planner {
         }
     }
 
-    void SuperPlanner::getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot) {
+    void SuperPlanner::latchHoldPoint() {
         cmd_traj_info_.lock();
         const double total_dur = cmd_traj_info_.getTotalDuration();
-        pvaj = cmd_traj_info_.posTraj().getState(total_dur);
-        yaw = cmd_traj_info_.getYaw(total_dur)[0];
+        hold_p_ = cmd_traj_info_.posTraj().getPos(total_dur);
+        hold_yaw_ = cmd_traj_info_.getYaw(total_dur)[0];
         cmd_traj_info_.unlock();
-        pvaj.rightCols(3).setZero();
+    }
+
+    void SuperPlanner::getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot) {
+        pvaj.setZero();
+        pvaj.col(0) = hold_p_;
+        yaw = hold_yaw_;
         yaw_dot = 0;
         if (std::isnan(yaw)) {
             yaw = std::isnan(look_at_yaw_) ? 0.0 : look_at_yaw_;

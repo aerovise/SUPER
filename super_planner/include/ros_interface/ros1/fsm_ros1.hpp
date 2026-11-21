@@ -258,6 +258,7 @@ namespace fsm {
             if (traj_finish_) {
                 cout << GREEN << " -- [Fsm] Traj finish." << RESET << endl;
                 if (machine_state_ == FOLLOW_TRAJ) {
+                    planner_ptr_->latchHoldPoint();
                     hold_cmd_valid_ = true;
                 }
                 if (closeToGoal(0.1)) {
@@ -361,20 +362,38 @@ namespace fsm {
         ///   mpc_cmd_topic). With yaw_mode 3, yaw and yaw_dot come from look-at.
         /// - EMER_STOP: as FOLLOW_TRAJ (upstream: the committed trajectory, which contains the
         ///   backup/stop segment), for the one FSM tick before it changes to WAIT_GOAL.
-        /// - WAIT_GOAL after a trajectory was flown to its end (directly, or via GENERATE_TRAJ
-        ///   finding the drone already at the goal), yaw_mode 3 only:
-        ///   a hover command at the trajectory's final point with zero velocity, acceleration
-        ///   and jerk, with the look-at yaw, or the last commanded yaw held once the target is
-        ///   stale. Only pos_cmd; nothing on mpc_cmd_topic.
-        /// - WAIT_GOAL otherwise (after EMER_STOP, an invalid goal, or with yaw_mode 1/2), and
-        ///   GENERATE_TRAJ: nothing is published (upstream); the controller keeps its last
-        ///   setpoint. The hover command is not sent after EMER_STOP, because there the
+        /// - WAIT_GOAL after a trajectory was flown to its end, yaw_mode 3 only: a hover command at
+        ///   the trajectory's final point, latched when it was reached (never read again from the
+        ///   live trajectory), with zero velocity, acceleration and jerk, and the look-at yaw, or
+        ///   the last commanded yaw held once the target is stale. Only pos_cmd; nothing on
+        ///   mpc_cmd_topic. This includes WAIT_GOAL reached through GENERATE_TRAJ (trajectory end
+        ///   0.1 m or more from the goal, or a later goal that was invalid): nothing new was
+        ///   committed and the drone is still at the latched point. If the robot is more than
+        ///   kHoverMaxOffset from the latched point, nothing is published (throttled warning): the
+        ///   controller keeps its last setpoint (px4_bridge/PX4 hold).
+        /// - WAIT_GOAL when no trajectory has been flown to its end since the last EMER_STOP or
+        ///   new trajectory (e.g. right after EMER_STOP, or after a NEW_TRAJ replan mid-flight that
+        ///   ended at the goal through GENERATE_TRAJ), WAIT_GOAL with yaw_mode 1/2, and
+        ///   GENERATE_TRAJ (including while a failed PlanFromRest retries there): nothing is
+        ///   published (upstream); the controller keeps its last setpoint. After EMER_STOP the
         ///   trajectory's final point is not where the drone stopped.
+        /// machine_state_ is checked and changed here without a lock around the sequence, as
+        /// upstream. The replan timer may switch FOLLOW_TRAJ -> EMER_STOP between the check and
+        /// hold_cmd_valid_ = true below; that is benign: ReplanOnce commits nothing on EMER, this
+        /// timer then sets WAIT_GOAL (upstream does the same), and the drone is at the latched
+        /// final point because the trajectory has finished.
+        static constexpr double kHoverMaxOffset = 0.5;
         void pubCmdTimerCallback(const ros::TimerEvent &event) {
             if (stop) {
                 return;
             }
             if (machine_state_ == WAIT_GOAL && hold_cmd_valid_ && planner_ptr_->yawToPointEnabled()) {
+                const double offset = (planner_ptr_->getHoldPoint() - robotPosition()).norm();
+                if (offset > kHoverMaxOffset) {
+                    ROS_WARN_THROTTLE(1.0, " -- [Fsm] hover point %.2f m from the robot (> %.2f m), "
+                                           "hover command not published.", offset, kHoverMaxOffset);
+                    return;
+                }
                 getHoldPositionCommand(pid_cmd_);
                 cmd_pub.publish(pid_cmd_);
                 return;
@@ -392,6 +411,7 @@ namespace fsm {
             if (traj_finish_) {
                 cout << GREEN << " -- [Fsm] Traj finish." << RESET << endl;
                 if (machine_state_ == FOLLOW_TRAJ) {
+                    planner_ptr_->latchHoldPoint();
                     hold_cmd_valid_ = true;
                 }
                 if (closeToGoal(0.1)) {

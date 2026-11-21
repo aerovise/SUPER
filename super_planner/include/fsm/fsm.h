@@ -60,7 +60,15 @@ namespace fsm {
         vector<double> log_module_time;
         double yaw_{0}, yaw_dot_{0};
 
+        // Written by the FSM timer (callMainFsmOnce) under robot_state_mutex_; that thread also
+        // reads it without the lock. Other threads read the position through robotPosition().
         rog_map::RobotState robot_state_;
+        std::mutex robot_state_mutex_;
+
+        Vec3f robotPosition() {
+            std::lock_guard<std::mutex> lck(robot_state_mutex_);
+            return robot_state_.p;
+        }
 
         // params
         bool started_{false}, plan_from_rest_{false};
@@ -163,10 +171,12 @@ namespace fsm {
         bool traj_finish_{false};
 
         // True once the committed trajectory has been flown to its end in FOLLOW_TRAJ (set by the
-        // command output when it sees traj_finish), so the drone rests at its final point. It
-        // survives FOLLOW_TRAJ -> GENERATE_TRAJ -> WAIT_GOAL (upstream's path when the end is
-        // 0.1 m or more from the goal) and is cleared on entering FOLLOW_TRAJ (a new trajectory),
-        // EMER_STOP or INIT (ChangeState). Gates the yaw_mode 3 hover command in WAIT_GOAL
+        // command output when it sees traj_finish, which also latches the hover point), so the
+        // drone rests at that point. It survives GENERATE_TRAJ -> WAIT_GOAL (upstream's path when
+        // the end is 0.1 m or more from the goal, and after a new goal turns out invalid; neither
+        // commits anything) and is cleared on entering FOLLOW_TRAJ (a new trajectory), EMER_STOP
+        // or INIT (ChangeState). A PlanFromRest failure stays in GENERATE_TRAJ and retries, with
+        // nothing published. Gates the yaw_mode 3 hover command in WAIT_GOAL
         // (FsmRos1::pubCmdTimerCallback).
         std::atomic<bool> hold_cmd_valid_{false};
 

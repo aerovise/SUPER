@@ -107,15 +107,21 @@ namespace super_planner {
         // Cap on the time step [s] of the yaw rate limiter, so a gap between commands does not
         // turn into one large yaw step.
         static constexpr double kLookAtMaxDt = 0.05;
-        // A target stamped more than this [s] in the future is rejected, and a clock jump back by
-        // more than this drops the stored target (sim or bag clock reset).
+        // A target stamped more than this [s] in the future is rejected on receipt.
         static constexpr double kYawTargetMaxFuture = 0.5;
+        // A stored target whose (receive-clamped) stamp is ahead of now by more than this [s] was
+        // received before the clock jumped back (sim or bag clock reset) and is dropped. The slack
+        // only absorbs the callback storing a slightly later "now" than the command thread read.
+        static constexpr double kYawTargetClockSlack = 0.05;
         std::mutex yaw_target_mutex_;
         Vec3f yaw_target_p_{0, 0, 0};
         double yaw_target_WT_{-1};  // < 0: no target
         double look_at_yaw_{NAN};   // last commanded yaw, continuous (not wrapped); NAN until the first command
         double look_at_last_WT_{-1};
         bool look_at_hold_{false};  // inside the hold radius (hysteresis state)
+        // Hover point latched by latchHoldPoint() when a trajectory ends (cmd timer thread only).
+        Vec3f hold_p_{0, 0, 0};
+        double hold_yaw_{NAN};
 
         void applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, const bool &hold_fallback,
                             double &yaw, double &yaw_dot);
@@ -151,9 +157,17 @@ namespace super_planner {
         /// points, are ignored.
         void setYawTarget(const Vec3f &p, const double &stamp_WT);
 
-        /// yaw_mode 3 hover command after a finished trajectory: the final point of the committed
-        /// trajectory with zero velocity, acceleration and jerk, and the look-at yaw. Without a
-        /// fresh target the last commanded yaw is held (yaw_dot 0).
+        /// yaw_mode 3: latch the final point (and yaw) of the committed trajectory as the hover
+        /// point. Call when the trajectory has just been flown to its end.
+        void latchHoldPoint();
+
+        const Vec3f &getHoldPoint() const {
+            return hold_p_;
+        }
+
+        /// yaw_mode 3 hover command: the latched hover point (never the live trajectory) with
+        /// zero velocity, acceleration and jerk, and the look-at yaw. Without a fresh target the
+        /// last commanded yaw is held (yaw_dot 0).
         void getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot);
 
         typedef std::shared_ptr<SuperPlanner> Ptr;
