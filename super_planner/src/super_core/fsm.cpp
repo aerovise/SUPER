@@ -188,18 +188,43 @@ namespace fsm {
             click_point.z() = cfg_.click_height;
         }
 
-        if (planner_ptr_->getMap()->getNearestInfCellNot(GridType::OCCUPIED, click_point, gi_.goal_p, 3.0)) {
-            cout << GREEN << " -- [Fsm] Get goal at " << RESET << gi_.goal_p.transpose() << endl;
-        } else {
+        // Snap into a local first: gi_.goal_p only changes once the goal is accepted below.
+        Vec3f goal_p;
+        if (!planner_ptr_->getMap()->getNearestInfCellNot(GridType::OCCUPIED, click_point, goal_p, 3.0)) {
             fmt::print(fg(fmt::color::indian_red), "Goal is deeply occupied, skip this goal.\n");
             return;
         }
 
-        if ((robot_state_.p - gi_.goal_p).norm() <
-            0.1) {
-            //                print(fg(color::gray), " -- [Rviz] Too close to goal, skip this target.\n");
+        const bool flying = machine_state_ == GENERATE_TRAJ || machine_state_ == FOLLOW_TRAJ;
+
+        // At rest, a goal within 0.1 m of the robot is skipped (upstream behaviour). While flying,
+        // it is a hold request ("stop and hover here"): it bypasses the regoal_dist gate below and
+        // always replaces the current goal; the planner brings the drone to rest at it and the FSM
+        // ends in WAIT_GOAL. A follower should latch the hold point: re-sending the live drone
+        // position while braking makes every message a new hold goal and forces a replan each time.
+        const bool near_robot = (robot_state_.p - goal_p).norm() < 0.1;
+        if (!flying && near_robot) {
             return;
         }
+        const bool hold = flying && near_robot;
+
+        // Moving-goal gate. While the current goal is being flown to, or has been reached, a goal
+        // within regoal_dist of it is ignored entirely (goal, yaw and new_goal untouched), so a
+        // 10 Hz goal stream that barely moves forces no replans (an accepted goal sets new_goal,
+        // which makes ReplanOnce replan instead of keeping the current trajectory). Goals are
+        // compared as received, before snapping: near obstacles the snap can move two nearby
+        // goals apart by more than regoal_dist. The comparison is always against the last
+        // accepted goal, so slow drift is accepted once it adds up past regoal_dist. Not gated:
+        // the first goal, and WAIT_GOAL away from the goal (after an invalid goal or an
+        // emergency stop), so a repeated goal there retries planning, and hold requests.
+        const bool goal_active = flying || (machine_state_ == WAIT_GOAL && closeToGoal(cfg_.regoal_dist));
+        if (!hold && started_ && goal_active && (click_point - gi_.click_p).norm() <= cfg_.regoal_dist) {
+            return;
+        }
+
+        gi_.click_p = click_point;
+        gi_.goal_p = goal_p;
+        cout << GREEN << " -- [Fsm] Get goal at " << RESET << gi_.goal_p.transpose() << endl;
 
         if (cfg_.click_yaw_en) {
             if (isnan(q.w()) || isnan(q.x()) || isnan(q.y()) || isnan(q.z())) {
@@ -220,6 +245,9 @@ namespace fsm {
 
         started_ = true;
         gi_.new_goal = true;
+        // finish_plan (set when PlanFromRest already reached the goal) stops callReplanOnce. The
+        // goal has moved, so resume replanning toward it.
+        finish_plan = false;
     }
 
     void Fsm::ChangeState(const string &call_func, const MACHINE_STATE &new_state) {

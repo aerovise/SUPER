@@ -67,6 +67,7 @@ namespace fsm {
             bool new_goal;
             Vec3f goal_p;
             double goal_yaw;
+            Vec3f click_p;  // last accepted goal as received (before snapping), for the regoal_dist gate
         } gi_;
 
         Eigen::Vector3d auto_pilot_vel_w_;
