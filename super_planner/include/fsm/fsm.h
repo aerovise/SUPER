@@ -61,7 +61,8 @@ namespace fsm {
         double yaw_{0}, yaw_dot_{0};
 
         // Written by the FSM timer (callMainFsmOnce) under robot_state_mutex_; that thread also
-        // reads it without the lock. Other threads read the position through robotPosition().
+        // reads it without the lock. Other threads read the position through robotPosition(), or
+        // copy the whole state under the lock (the hover guard in FsmRos1::pubCmdTimerCallback).
         rog_map::RobotState robot_state_;
         std::mutex robot_state_mutex_;
 

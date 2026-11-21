@@ -28,6 +28,10 @@
 #define SRC_FSM_ROS1_HPP
 
 #include "fsm/fsm.h"
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
 
 #include "ros/ros.h"
 #include "geometry_msgs/PoseStamped.h"
@@ -319,6 +323,20 @@ namespace fsm {
             }
 
             if (planner_ptr_->yawToPointEnabled()) {
+                // The hover command needs its guard limits; never guess them. A missing or
+                // mistyped parameter is NaN. _Exit as in SuperPlanner's config check.
+                const std::pair<const char *, double> hover_limits[] = {
+                        {"fsm/hover_max_odom_age", cfg_.hover_max_odom_age},
+                        {"fsm/hover_max_offset", cfg_.hover_max_offset}};
+                for (const auto &limit : hover_limits) {
+                    if (!std::isfinite(limit.second) || !(limit.second > 0)) {
+                        ROS_FATAL(" -- [Fsm] invalid config: %s = %f must be set, finite and > 0 "
+                                  "with super_planner/yaw_mode 3. Exiting.", limit.first, limit.second);
+                        std::cout.flush();
+                        std::fflush(stdout);
+                        std::_Exit(EXIT_FAILURE);
+                    }
+                }
                 yaw_target_sub_ = nh_.subscribe(cfg_.yaw_target_topic, 1, &FsmRos1::yawTargetCallback, this);
                 cout << YELLOW << " -- [Fsm] YAW TO POINT ENABLE, target topic: " << cfg_.yaw_target_topic << RESET << endl;
             }
@@ -368,9 +386,11 @@ namespace fsm {
         ///   the last commanded yaw held once the target is stale. Only pos_cmd; nothing on
         ///   mpc_cmd_topic. This includes WAIT_GOAL reached through GENERATE_TRAJ (trajectory end
         ///   0.1 m or more from the goal, or a later goal that was invalid): nothing new was
-        ///   committed and the drone is still at the latched point. If the robot is more than
-        ///   kHoverMaxOffset from the latched point, nothing is published (throttled warning): the
-        ///   controller keeps its last setpoint (px4_bridge/PX4 hold).
+        ///   committed and the drone is still at the latched point. If odometry has not been
+        ///   received or is older than fsm/hover_max_odom_age, or the robot is not within
+        ///   fsm/hover_max_offset of the latched point (including a NaN offset), nothing is
+        ///   published (throttled warning): the controller keeps its last setpoint (px4_bridge/PX4
+        ///   hold).
         /// - WAIT_GOAL when no trajectory has been flown to its end since the last EMER_STOP or
         ///   new trajectory (e.g. right after EMER_STOP, or after a NEW_TRAJ replan mid-flight that
         ///   ended at the goal through GENERATE_TRAJ), WAIT_GOAL with yaw_mode 1/2, and
@@ -378,20 +398,40 @@ namespace fsm {
         ///   published (upstream); the controller keeps its last setpoint. After EMER_STOP the
         ///   trajectory's final point is not where the drone stopped.
         /// machine_state_ is checked and changed here without a lock around the sequence, as
-        /// upstream. The replan timer may switch FOLLOW_TRAJ -> EMER_STOP between the check and
-        /// hold_cmd_valid_ = true below; that is benign: ReplanOnce commits nothing on EMER, this
-        /// timer then sets WAIT_GOAL (upstream does the same), and the drone is at the latched
-        /// final point because the trajectory has finished.
-        static constexpr double kHoverMaxOffset = 0.5;
+        /// upstream. The replan timer may switch FOLLOW_TRAJ -> EMER_STOP or FOLLOW_TRAJ ->
+        /// GENERATE_TRAJ (NEW_TRAJ) between the check and hold_cmd_valid_ = true below. Both are
+        /// benign because the trajectory has finished, so the drone is at the latched final point:
+        /// - EMER_STOP: ReplanOnce committed nothing; this timer then sets WAIT_GOAL or
+        ///   GENERATE_TRAJ (upstream does the same), and the flag may stay set, so the hover is
+        ///   published at that point in WAIT_GOAL.
+        /// - GENERATE_TRAJ: this timer then sets WAIT_GOAL (hover at that point) or GENERATE_TRAJ
+        ///   (nothing published) until a new trajectory enters FOLLOW_TRAJ and clears the flag.
+        /// Should a new trajectory be committed inside that window, the latched point may not be
+        /// where the drone is; the odometry and offset checks below then suppress the hover.
         void pubCmdTimerCallback(const ros::TimerEvent &event) {
             if (stop) {
                 return;
             }
             if (machine_state_ == WAIT_GOAL && hold_cmd_valid_ && planner_ptr_->yawToPointEnabled()) {
-                const double offset = (planner_ptr_->getHoldPoint() - robotPosition()).norm();
-                if (offset > kHoverMaxOffset) {
+                rog_map::RobotState rs;
+                {
+                    std::lock_guard<std::mutex> lck(robot_state_mutex_);
+                    rs = robot_state_;  // p and rcv_time from the same odometry sample
+                }
+                if (!rs.rcv) {
+                    ROS_WARN_THROTTLE(1.0, " -- [Fsm] no odometry received, hover command not published.");
+                    return;
+                }
+                const double odom_age = ros_ptr_->getSimTime() - rs.rcv_time;
+                if (!(odom_age <= cfg_.hover_max_odom_age)) {
+                    ROS_WARN_THROTTLE(1.0, " -- [Fsm] odometry %.3f s old (> %.2f s), "
+                                           "hover command not published.", odom_age, cfg_.hover_max_odom_age);
+                    return;
+                }
+                const double offset = (planner_ptr_->getHoldPoint() - rs.p).norm();
+                if (!(offset <= cfg_.hover_max_offset)) {
                     ROS_WARN_THROTTLE(1.0, " -- [Fsm] hover point %.2f m from the robot (> %.2f m), "
-                                           "hover command not published.", offset, kHoverMaxOffset);
+                                           "hover command not published.", offset, cfg_.hover_max_offset);
                     return;
                 }
                 getHoldPositionCommand(pid_cmd_);

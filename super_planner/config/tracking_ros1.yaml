@@ -11,6 +11,17 @@ fsm:
   regoal_dist: 0.5
   # tracker-drone: new. Point the yaw looks at in yaw_mode 3 (geometry_msgs/PointStamped, world frame).
   yaw_target_topic: "/planning/yaw_target"
+  # tracker-drone: new, required with yaw_mode 3 (the node exits if missing, non-finite or <= 0).
+  # Maximum age [s] of the latest odometry for the yaw_mode 3 hover command. On an odometry stall
+  # (FAST_LIO stops, messages lost) no hover command is published, so PX4/px4_bridge holds instead
+  # of trusting a frozen position. 0.3 s is about 3 periods at the 10 Hz preflight floor of
+  # /lidar_slam/odom, so normal 10 Hz arrival gaps never trip it.
+  hover_max_odom_age: 0.3
+  # tracker-drone: new, required with yaw_mode 3 (the node exits if missing, non-finite or <= 0).
+  # Maximum distance [m] between the robot and the latched hover point. When it fires (the drone is
+  # not where the hover would hold it, or the distance is NaN) no hover command is published, so
+  # PX4/px4_bridge holds instead of flying back to a stale point.
+  hover_max_offset: 0.5
   click_yaw_en: true
   replan_rate: 15.0
   cmd_topic: "/planning/pos_cmd"

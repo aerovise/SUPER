@@ -189,6 +189,7 @@ namespace super_planner {
         gi_.new_goal = new_goal;
         gi_.goal_valid = true;
         latest_replan.reset();
+        // Unlocked read of robot_state_ (written by getRobotState on the FSM timer): pre-existing upstream race.
         latest_replan.setGoal(goal_p, goal_yaw, robot_state_);
 
         vec_Vec3f viz_pts{goal_p, robot_state_.p};

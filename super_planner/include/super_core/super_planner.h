@@ -119,7 +119,8 @@ namespace super_planner {
         double look_at_yaw_{NAN};   // last commanded yaw, continuous (not wrapped); NAN until the first command
         double look_at_last_WT_{-1};
         bool look_at_hold_{false};  // inside the hold radius (hysteresis state)
-        // Hover point latched by latchHoldPoint() when a trajectory ends (cmd timer thread only).
+        // Hover point latched by latchHoldPoint() when a trajectory ends. Written and read only by
+        // the cmd output (FsmRos1::pubCmdTimerCallback / getPoseFromTraj, never concurrent).
         Vec3f hold_p_{0, 0, 0};
         double hold_yaw_{NAN};
 

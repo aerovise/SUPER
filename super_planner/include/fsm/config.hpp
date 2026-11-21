@@ -29,6 +29,7 @@
 #include <super_core/config.hpp>
 #include <vector>
 #include <cstring>
+#include <limits>
 #include <utils/header/yaml_loader.hpp>
 
 namespace fsm {
@@ -54,6 +55,15 @@ namespace fsm {
         // geometry_msgs/PointStamped (world frame) the yaw looks at; subscribed only with super_planner/yaw_mode 3.
         string yaw_target_topic;
         double yaw_dot_max{};
+        // yaw_mode 3 hover command: maximum odometry age [s] (time since the last odometry message
+        // arrived). Older odometry suppresses the hover (see FsmRos1::pubCmdTimerCallback). No
+        // usable default: NaN when missing, and FsmRos1::init exits if yaw_mode 3 is set without a
+        // finite value > 0.
+        double hover_max_odom_age{std::numeric_limits<double>::quiet_NaN()};
+        // yaw_mode 3 hover command: maximum distance [m] between the robot and the latched hover
+        // point; farther suppresses the hover. Same rules as hover_max_odom_age (NaN when missing,
+        // FsmRos1::init exits with yaw_mode 3 unless finite and > 0).
+        double hover_max_offset{std::numeric_limits<double>::quiet_NaN()};
 
         Config() = default;
 
@@ -70,6 +80,10 @@ namespace fsm {
             loader.LoadParam("fsm/mpc_cmd_topic", mpc_cmd_topic, string("/planning_cmd/mpc"));
             loader.LoadParam("fsm/click_goal_topic", click_goal_topic, string("/planning/click_goal_topic"));
             loader.LoadParam("fsm/yaw_target_topic", yaw_target_topic, string("/planning/yaw_target"));
+            loader.LoadParam("fsm/hover_max_odom_age", hover_max_odom_age,
+                             std::numeric_limits<double>::quiet_NaN());
+            loader.LoadParam("fsm/hover_max_offset", hover_max_offset,
+                             std::numeric_limits<double>::quiet_NaN());
 
 
             loader.LoadParam("super_planner/yaw_dot_max", yaw_dot_max, 1.0, true);
