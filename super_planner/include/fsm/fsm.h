@@ -110,7 +110,9 @@ namespace fsm {
         };
 
 
-        MACHINE_STATE machine_state_{INIT};
+        // Atomic: read by the goal callback; read and written by the cmd, FSM and replan timers.
+        // Check-then-act sequences on it are not atomic (as upstream); see FsmRos1::pubCmdTimerCallback.
+        std::atomic<MACHINE_STATE> machine_state_{INIT};
 
 
     public:
@@ -123,7 +125,7 @@ namespace fsm {
 
         void callPlanOnce(const Vec3f &goal) {
             TimeConsuming tc("Call replan once time", true);
-            fmt::print(" -- [Fsm] Call plan once, cur state {}.\n", MACHINE_STATE_STR[machine_state_]);
+            fmt::print(" -- [Fsm] Call plan once, cur state {}.\n", MACHINE_STATE_STR[machine_state_.load()]);
             // check current state;
             Quatf q(NAN, NAN, NAN, NAN);
             setGoalPosiAndYaw(goal, q);

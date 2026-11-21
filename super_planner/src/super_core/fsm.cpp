@@ -115,7 +115,12 @@ namespace fsm {
         static double fsm_start_time = ros_ptr_->getSimTime();
         double cur_t = (ros_ptr_->getSimTime() - fsm_start_time);
         static double last_print_t = 0.0;
-        planner_ptr_->getRobotState(robot_state_);
+        {
+            rog_map::RobotState rs;
+            planner_ptr_->getRobotState(rs);
+            std::lock_guard<std::mutex> lck(robot_state_mutex_);
+            robot_state_ = rs;
+        }
 
 
         if (cur_t - last_print_t > 1.0) {
@@ -128,7 +133,7 @@ namespace fsm {
                 cout << YELLOW << " -- [Fsm] Wait for goal." << RESET << endl;
             }
             cout << std::fixed << std::setprecision(3);
-            cout << GREEN << " -- [Fsm " << cur_t << "] Current state: " << MACHINE_STATE_STR[machine_state_]
+            cout << GREEN << " -- [Fsm " << cur_t << "] Current state: " << MACHINE_STATE_STR[machine_state_.load()]
                  << RESET << endl;
         }
 
@@ -221,8 +226,9 @@ namespace fsm {
         /// The close to goal should consider the the local shift
         /// All goal should be in the known free on inf map.
         /// The intermedia points should be in free space.
+        const Vec3f robot_p = robotPosition();  // before goal_mutex_: the two locks never nest
         std::lock_guard<std::mutex> lck(goal_mutex_);
-        double dis = (robot_state_.p - gi_.goal_p).norm();
+        double dis = (robot_p - gi_.goal_p).norm();
         return dis < thresh_dis;
     }
 
@@ -232,6 +238,9 @@ namespace fsm {
         if (cfg_.click_height > -5) {
             click_point.z() = cfg_.click_height;
         }
+
+        // Robot position snapshot (the FSM timer updates robot_state_ concurrently).
+        const Vec3f robot_p = robotPosition();
 
         // Snap into a local first: gi_.goal_p only changes once the goal is accepted below.
         Vec3f goal_p;
@@ -247,7 +256,7 @@ namespace fsm {
         // always replaces the current goal; the planner brings the drone to rest at it and the FSM
         // ends in WAIT_GOAL. A follower should latch the hold point: re-sending the live drone
         // position while braking makes every message a new hold goal and forces a replan each time.
-        const bool near_robot = (robot_state_.p - goal_p).norm() < 0.1;
+        const bool near_robot = (robot_p - goal_p).norm() < 0.1;
         if (!flying && near_robot) {
             return;
         }
@@ -267,7 +276,7 @@ namespace fsm {
         // the first goal, and WAIT_GOAL away from the goal (after an invalid goal or an
         // emergency stop), so a repeated goal there retries planning, and hold requests.
         const bool goal_active = flying || (machine_state_ == WAIT_GOAL &&
-                                            (robot_state_.p - gi_.goal_p).norm() < cfg_.regoal_dist);
+                                            (robot_p - gi_.goal_p).norm() < cfg_.regoal_dist);
         if (!hold && started_ && goal_active && (click_point - gi_.click_p).norm() <= cfg_.regoal_dist) {
             return;
         }
@@ -309,7 +318,7 @@ namespace fsm {
 
     void Fsm::ChangeState(const string &call_func, const MACHINE_STATE &new_state) {
         fmt::print(fg(fmt::color::green), " -- [Fsm]: [{}] change state from [{}] to [{}].\n", call_func,
-                   MACHINE_STATE_STR[int(machine_state_)], MACHINE_STATE_STR[int(new_state)]);
+                   MACHINE_STATE_STR[int(machine_state_.load())], MACHINE_STATE_STR[int(new_state)]);
         if (new_state == FOLLOW_TRAJ || new_state == EMER_STOP || new_state == INIT) {
             hold_cmd_valid_ = false;
         }

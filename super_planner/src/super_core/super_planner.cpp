@@ -22,6 +22,8 @@
 */
 
 #include <super_core/super_planner.h>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <super_utils/scope_timer.hpp>
 #include <fmt/color.h>
@@ -443,7 +445,6 @@ namespace super_planner {
             look_at_yaw_ = yaw;
             look_at_last_WT_ = cur_WT;
         }
-        const bool clock_jumped_back = cur_WT < look_at_last_WT_ - kYawTargetMaxFuture;
         const double dt = std::min(std::max(cur_WT - look_at_last_WT_, 0.0), kLookAtMaxDt);
         look_at_last_WT_ = cur_WT;
 
@@ -451,10 +452,10 @@ namespace super_planner {
         double target_WT;
         {
             std::lock_guard<std::mutex> lck(yaw_target_mutex_);
-            // After a large backward clock jump, or for a target now far in the future, the stored
-            // stamp no longer means anything: drop it, which ends in the fallback.
-            if (yaw_target_WT_ >= 0 &&
-                (clock_jumped_back || cur_WT - yaw_target_WT_ < -kYawTargetMaxFuture)) {
+            // A stored stamp is clamped to the receive time, so in normal operation it is never
+            // ahead of now; one that is ahead was received before the clock jumped back and is
+            // dropped, which ends in the fallback. A target received on the new clock is kept.
+            if (yaw_target_WT_ > cur_WT + kYawTargetClockSlack) {
                 yaw_target_WT_ = -1;
                 ros_ptr_->warn(" -- [SUPER] yaw target stamp invalid after a clock jump, target dropped.");
             }
