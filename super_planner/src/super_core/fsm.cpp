@@ -271,6 +271,12 @@ namespace fsm {
         if (!hold && started_ && goal_active && (click_point - gi_.click_p).norm() <= cfg_.regoal_dist) {
             return;
         }
+        // A hold request within 0.2 m (twice the hold radius) of the current goal changes nothing:
+        // the drone already stops there. Ignoring it keeps a goal stream that sits on the drone
+        // while it arrives at its goal (still FOLLOW_TRAJ) from forcing a replan per message.
+        if (hold && started_ && (goal_p - gi_.goal_p).norm() <= 0.2) {
+            return;
+        }
 
         gi_.click_p = click_point;
         gi_.goal_p = goal_p;
