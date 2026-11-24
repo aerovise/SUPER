@@ -99,7 +99,9 @@ namespace fsm {
             YAWING,
             GENERATE_TRAJ,
             FOLLOW_TRAJ,
-            EMER_STOP
+            EMER_STOP,
+            // Stopping along the committed trajectory (see startBrake); ends in WAIT_GOAL.
+            BRAKE
         };
 
         vector<string> MACHINE_STATE_STR{
@@ -107,7 +109,7 @@ namespace fsm {
                 "WAIT_GOAL",
                 "YAWING",
                 "GENERATE_TRAJ",
-                "FOLLOW_TRAJ", "EMER_STOP"
+                "FOLLOW_TRAJ", "EMER_STOP", "BRAKE"
         };
 
 
@@ -182,6 +184,41 @@ namespace fsm {
         // nothing published. Gates the yaw_mode 3 hover command in WAIT_GOAL
         // (FsmRos1::pubCmdTimerCallback).
         std::atomic<bool> hold_cmd_valid_{false};
+
+        // Brake (FOLLOW_TRAJ -> BRAKE -> WAIT_GOAL): the committed trajectory is replaced by a stop
+        // along its own path (SuperPlanner::prepareBrake), sent by the cmd output; replans stop
+        // (callReplanOnce runs only in FOLLOW_TRAJ). Trigger: an accepted hold request.
+        // brake_mutex_ serialises startBrake (goal callback and replan timer).
+        std::mutex brake_mutex_;
+        // goal_seq_ when the brake started, and whether a hold request started it (see finishBrake).
+        std::atomic<uint64_t> brake_seq_{0};
+        std::atomic<bool> brake_for_hold_{false};
+
+        /// True when the cmd output sends brake commands in BRAKE. Without it no brake starts and
+        /// the upstream behaviour is kept (ROS2).
+        virtual bool brakeSupported() const {
+            return false;
+        }
+
+        /// Start a brake if the state is FOLLOW_TRAJ and a trajectory is still being flown.
+        /// trigger names it in the log; seq is the goal_seq_ it was decided for; hold is true for
+        /// a hold request. Returns false, changing nothing, otherwise: in another state the brake
+        /// is not needed (BRAKE: already braking) or not possible (GENERATE_TRAJ: no trajectory is
+        /// flown, nothing is published), and after the trajectory end the drone is at rest there.
+        bool startBrake(const char *trigger, const uint64_t &seq, const bool &hold);
+
+        /// Called by the cmd output when the brake profile has ended and the stop point is latched
+        /// as the hover point: BRAKE -> WAIT_GOAL with the hover command valid. After a hold
+        /// request, if no goal came in since, the goal becomes the stop point (new_goal false), so
+        /// the drone hovers there instead of flying back to the hold point it braked past. Else
+        /// the newer goal (or, after the replan trigger, the goal that failed) is planned from rest
+        /// in GENERATE_TRAJ; until a trajectory is committed nothing is published there and the
+        /// controller keeps the last brake command: the stop point at zero velocity.
+        void finishBrake();
+
+        /// ChangeState only if the state is still expected (atomic compare-and-swap). A timer that
+        /// decided on a stale state then leaves a brake started meanwhile in place.
+        bool changeStateFrom(const string &call_func, MACHINE_STATE expected, const MACHINE_STATE &new_state);
 
         void WriteTimeToLog();
 

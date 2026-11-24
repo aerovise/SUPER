@@ -143,6 +143,10 @@ namespace fsm {
             fillPositionCommand(pvaj, yaw, yaw_dot, on_backup_traj, pos_cmd);
         }
 
+        bool brakeSupported() const override {
+            return true;
+        }
+
         /// yaw_mode 3 hover command, see pubCmdTimerCallback.
         void getHoldPositionCommand(quadrotor_msgs::PositionCommand &pos_cmd) {
             StatePVAJ pvaj;
@@ -380,6 +384,12 @@ namespace fsm {
         ///   mpc_cmd_topic). With yaw_mode 3, yaw and yaw_dot come from look-at.
         /// - EMER_STOP: as FOLLOW_TRAJ (upstream: the committed trajectory, which contains the
         ///   backup/stop segment), for the one FSM tick before it changes to WAIT_GOAL.
+        /// - BRAKE: the brake profile (SuperPlanner::getBrakeCommand), on pos_cmd only: nothing on
+        ///   mpc_cmd_topic, so a controller tracking the polynomial trajectory there is not
+        ///   braked. When the profile ends, the last command is the stop point at zero velocity,
+        ///   the stop point is latched as the hover point and finishBrake changes to WAIT_GOAL:
+        ///   the hover above (yaw_mode 3), or nothing published (yaw_mode 1/2, or a newer goal
+        ///   planned from rest in GENERATE_TRAJ), so the controller keeps that last command.
         /// - WAIT_GOAL after a trajectory was flown to its end, yaw_mode 3 only: a hover command at
         ///   the trajectory's final point, latched when it was reached (never read again from the
         ///   live trajectory), with zero velocity, acceleration and jerk, and the look-at yaw, or
@@ -438,7 +448,21 @@ namespace fsm {
                 cmd_pub.publish(pid_cmd_);
                 return;
             }
-            if (machine_state_ != FOLLOW_TRAJ && machine_state_ != EMER_STOP) {
+            if (machine_state_ == BRAKE) {
+                StatePVAJ pvaj;
+                double yaw, yaw_dot;
+                bool finished;
+                planner_ptr_->getBrakeCommand(pvaj, yaw, yaw_dot, finished);
+                fillPositionCommand(pvaj, yaw, yaw_dot, false, pid_cmd_);
+                cmd_pub.publish(pid_cmd_);
+                if (finished) {
+                    planner_ptr_->latchBrakeStopPoint();
+                    finishBrake();
+                }
+                return;
+            }
+            const MACHINE_STATE observed = machine_state_;
+            if (observed != FOLLOW_TRAJ && observed != EMER_STOP) {
                 return;
             }
 
@@ -454,11 +478,9 @@ namespace fsm {
                     planner_ptr_->latchHoldPoint();
                     hold_cmd_valid_ = true;
                 }
-                if (closeToGoal(0.1)) {
-                    ChangeState("PubCmdCallback", WAIT_GOAL);
-                } else {
-                    ChangeState("PubCmdCallback", GENERATE_TRAJ);
-                }
+                // From the state seen above only: a brake started meanwhile stays in place (it
+                // stops at the trajectory end at the latest, then finishBrake).
+                changeStateFrom("PubCmdCallback", observed, closeToGoal(0.1) ? WAIT_GOAL : GENERATE_TRAJ);
             }
         }
 
