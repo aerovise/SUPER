@@ -345,6 +345,15 @@ namespace fsm {
                 cout << YELLOW << " -- [Fsm] YAW TO POINT ENABLE, target topic: " << cfg_.yaw_target_topic << RESET << endl;
             }
 
+            // The replan-failure brake needs its time limit; never guess it (NaN when missing).
+            if (!std::isfinite(cfg_.brake_after_replan_fail) || !(cfg_.brake_after_replan_fail > 0)) {
+                ROS_FATAL(" -- [Fsm] invalid config: fsm/brake_after_replan_fail = %f must be set, finite "
+                          "and > 0. Exiting.", cfg_.brake_after_replan_fail);
+                std::cout.flush();
+                std::fflush(stdout);
+                std::_Exit(EXIT_FAILURE);
+            }
+
             if (cmd_cnt != 1) {
                 cout << YELLOW << " -- [Fsm] CMD INPUT ERROR." << RESET << endl;
                 exit(0);

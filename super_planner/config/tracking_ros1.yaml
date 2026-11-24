@@ -22,6 +22,13 @@ fsm:
   # not where the hover would hold it, or the distance is NaN) no hover command is published, so
   # PX4/px4_bridge holds instead of flying back to a stale point.
   hover_max_offset: 0.5
+  # tracker-drone: new, required (the node exits if missing, non-finite or <= 0). When replans fail
+  # for longer than this [s] while the goal differs from the one the flown trajectory was planned
+  # for, the drone brakes along that trajectory (within traj_opt max_acc/max_jerk) and hovers where
+  # it stops, then plans from rest toward the latest goal. Upstream kept flying the old trajectory
+  # at speed ("force return"); with an unchanged goal it still does. 0.3 s is about 4 failed replans
+  # at replan_rate 15. An accepted hold request brakes the same way at once.
+  brake_after_replan_fail: 0.3
   click_yaw_en: true
   replan_rate: 15.0
   cmd_topic: "/planning/pos_cmd"

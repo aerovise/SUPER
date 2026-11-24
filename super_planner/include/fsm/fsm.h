@@ -187,12 +187,19 @@ namespace fsm {
 
         // Brake (FOLLOW_TRAJ -> BRAKE -> WAIT_GOAL): the committed trajectory is replaced by a stop
         // along its own path (SuperPlanner::prepareBrake), sent by the cmd output; replans stop
-        // (callReplanOnce runs only in FOLLOW_TRAJ). Trigger: an accepted hold request.
-        // brake_mutex_ serialises startBrake (goal callback and replan timer).
+        // (callReplanOnce runs only in FOLLOW_TRAJ). Triggers: an accepted hold request, and
+        // replans failing for longer than brake_after_replan_fail while the goal differs from the
+        // committed one. brake_mutex_ serialises startBrake (goal callback and replan timer).
         std::mutex brake_mutex_;
         // goal_seq_ when the brake started, and whether a hold request started it (see finishBrake).
         std::atomic<uint64_t> brake_seq_{0};
         std::atomic<bool> brake_for_hold_{false};
+        // goal_seq_ of the goal the committed trajectory was planned for (PlanFromRest or a
+        // successful ReplanOnce).
+        std::atomic<uint64_t> committed_seq_{0};
+        // Replan timer only: time of the first failed replan in the current run of failures with
+        // a goal other than the committed one; < 0 when there is none.
+        double replan_fail_since_{-1};
 
         /// True when the cmd output sends brake commands in BRAKE. Without it no brake starts and
         /// the upstream behaviour is kept (ROS2).

@@ -68,6 +68,8 @@ namespace fsm {
 
         if (plan_from_rest_) {
             plan_from_rest_ = false;
+            // A new trajectory from rest: failures of earlier ones do not count toward the brake.
+            replan_fail_since_ = -1;
             return;
         }
 
@@ -95,6 +97,8 @@ namespace fsm {
         } else if (ret_code == NEW_TRAJ) {
             changeStateFrom("ReplanTimerCallback", FOLLOW_TRAJ, GENERATE_TRAJ);
         } else if (ret_code == SUCCESS || ret_code == FINISH) {
+            committed_seq_ = seq;
+            replan_fail_since_ = -1;
             {
                 std::lock_guard<std::mutex> lck(goal_mutex_);
                 if (seq == goal_seq_) {
@@ -103,6 +107,30 @@ namespace fsm {
             }
             if (machine_state_ == FOLLOW_TRAJ) {
                 publishPolyTraj();
+            }
+        } else if (ret_code == FAILED) {
+            // Replan-failure brake. Upstream keeps flying the committed trajectory while replans
+            // fail ("force return"). That is kept while the goal is the one the trajectory was
+            // planned for: the trajectory still leads there and ends in its backup stop in known
+            // free space. Once the goal has changed (e.g. the follower asks to retreat or hold),
+            // the trajectory flies toward a place nobody asks for any more, at speed. When the
+            // failures with a changed goal have lasted longer than brake_after_replan_fail, the
+            // drone brakes along the trajectory and hovers at the stop point (startBrake), then
+            // plans from rest toward the latest goal (finishBrake). If no brake is possible
+            // (trajectory already flown to its end), the drone is at rest there.
+            if (seq == committed_seq_) {
+                replan_fail_since_ = -1;
+            } else {
+                const double now = ros_ptr_->getSimTime();
+                if (replan_fail_since_ < 0) {
+                    replan_fail_since_ = now;
+                }
+                const double failing_for = now - replan_fail_since_;
+                if (failing_for > cfg_.brake_after_replan_fail) {
+                    const std::string trigger = fmt::format(
+                            "replan_fail: replans failing for {:.2f} s with a new goal", failing_for);
+                    startBrake(trigger.c_str(), seq, false);
+                }
             }
         }
 
@@ -196,6 +224,7 @@ namespace fsm {
                 }
                 if (retcode == SUCCESS || retcode == FINISH) {
                     plan_from_rest_ = true;
+                    committed_seq_ = seq;
                     {
                         std::lock_guard<std::mutex> lck(goal_mutex_);
                         if (seq == goal_seq_) {

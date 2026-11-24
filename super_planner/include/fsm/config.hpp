@@ -64,6 +64,10 @@ namespace fsm {
         // point; farther suppresses the hover. Same rules as hover_max_odom_age (NaN when missing,
         // FsmRos1::init exits with yaw_mode 3 unless finite and > 0).
         double hover_max_offset{std::numeric_limits<double>::quiet_NaN()};
+        // Brake when replans fail for longer than this [s] while the goal differs from the one the
+        // committed trajectory was planned for (see Fsm::callReplanOnce). No usable default: NaN
+        // when missing, and FsmRos1::init exits unless finite and > 0.
+        double brake_after_replan_fail{std::numeric_limits<double>::quiet_NaN()};
 
         Config() = default;
 
@@ -83,6 +87,8 @@ namespace fsm {
             loader.LoadParam("fsm/hover_max_odom_age", hover_max_odom_age,
                              std::numeric_limits<double>::quiet_NaN());
             loader.LoadParam("fsm/hover_max_offset", hover_max_offset,
+                             std::numeric_limits<double>::quiet_NaN());
+            loader.LoadParam("fsm/brake_after_replan_fail", brake_after_replan_fail,
                              std::numeric_limits<double>::quiet_NaN());
 
 
