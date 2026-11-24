@@ -22,6 +22,7 @@
 */
 
 #include <super_core/super_planner.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -40,10 +41,15 @@ namespace super_planner {
         // Fail loudly on unusable yaw limits instead of guessing a value: yaw_dot_max <= 0 freezes
         // or inverts the yaw limiter (and divides by zero in YawTrajOpt), yaw_target_timeout <= 0
         // silently disables yaw_mode 3. "!(x > 0)" also catches NaN.
-        if (!(cfg_.yaw_dot_max > 0) || !(cfg_.yaw_target_timeout > 0)) {
-            ros_ptr_->fatal(" -- [SUPER] invalid config: super_planner/yaw_dot_max = {} and "
-                            "super_planner/yaw_target_timeout = {} must both be > 0. Exiting.",
-                            cfg_.yaw_dot_max, cfg_.yaw_target_timeout);
+        // traj_opt/boundary/max_acc and max_jerk also bound the brake (prepareBrake); <= 0 (or
+        // missing: -1) would leave it without a limit.
+        if (!(cfg_.yaw_dot_max > 0) || !(cfg_.yaw_target_timeout > 0) ||
+            !(cfg_.exp_traj_cfg.max_acc > 0) || !(cfg_.exp_traj_cfg.max_jerk > 0)) {
+            ros_ptr_->fatal(" -- [SUPER] invalid config: super_planner/yaw_dot_max = {}, "
+                            "super_planner/yaw_target_timeout = {}, traj_opt/boundary/max_acc = {} and "
+                            "traj_opt/boundary/max_jerk = {} must all be > 0. Exiting.",
+                            cfg_.yaw_dot_max, cfg_.yaw_target_timeout, cfg_.exp_traj_cfg.max_acc,
+                            cfg_.exp_traj_cfg.max_jerk);
             // _Exit, not exit: exit() would run the global FsmRos1 destructor, which calls exit(0)
             // itself and turns this into a clean exit code.
             std::cout.flush();
@@ -407,6 +413,137 @@ namespace super_planner {
             yaw = std::isnan(look_at_yaw_) ? 0.0 : look_at_yaw_;
         }
         applyLookAtYaw(pvaj.col(0), ros_ptr_->getSimTime(), true, yaw, yaw_dot);
+    }
+
+    /// The command at time t is the trajectory state at path time s(t): position P(s), velocity
+    /// P'(s) s', acceleration P''(s) s'^2 + P'(s) u, with u = s''. Each step picks the most
+    /// negative u allowed by three limits, and never a positive one:
+    /// - acceleration: |P'' s'^2 + P' u| <= max_acc. Where even u = 0 exceeds it, u is the value
+    ///   closest to it (clamped to 0), which is never more than the committed trajectory's own
+    ///   acceleration (s' <= 1 only scales it down);
+    /// - jerk while braking harder: the tangential deceleration |P'| u grows by at most
+    ///   max_jerk per second;
+    /// - jerk at the stop: the deceleration is at most sqrt(2 max_jerk v), so it falls to 0 as
+    ///   the speed v does and the stop has no acceleration step.
+    /// It ends when the speed drops below kBrakeStopSpeed or the trajectory end is reached (the
+    /// trajectory is at rest there), with s' = 0.
+    bool SuperPlanner::prepareBrake(const double &now_WT, double &speed, Vec3f &stop_p, double &stop_dist,
+                                    double &stop_time) {
+        Trajectory pos_traj, yaw_traj;
+        cmd_traj_info_.lock();
+        const bool empty = cmd_traj_info_.empty();
+        if (!empty) {
+            pos_traj = cmd_traj_info_.posTraj();
+            yaw_traj = cmd_traj_info_.yawTraj();
+        }
+        cmd_traj_info_.unlock();
+        if (empty || pos_traj.empty()) {
+            return false;
+        }
+        const double total_dur = pos_traj.getTotalDuration();
+        double s = std::max(now_WT - pos_traj.start_WT, 0.0);
+        if (s >= total_dur) {
+            return false;
+        }
+
+        const double a_max = cfg_.exp_traj_cfg.max_acc;
+        const double j_max = cfg_.exp_traj_cfg.max_jerk;
+        const double h = kBrakeDt;
+        BrakeProfile b;
+        b.start_WT = now_WT;
+        double sd = 1.0, u_prev = 0.0;
+        StatePVAJ st;
+        pos_traj.getState(s, st);
+        speed = st.col(1).norm();
+        const Vec3f start_p = st.col(0);
+        stop_dist = 0.0;
+        Vec3f last_p = start_p;
+        const auto max_steps = static_cast<size_t>(kBrakeMaxDuration / h);
+        while (true) {
+            pos_traj.getState(s, st);
+            stop_dist += (st.col(0) - last_p).norm();
+            last_p = st.col(0);
+            const Vec3f B = st.col(1);
+            const double b_norm = B.norm();
+            const double v = b_norm * sd;
+            if (v < kBrakeStopSpeed || s >= total_dur || b.s.size() >= max_steps) {
+                b.s.push_back(s);
+                b.sd.push_back(0.0);
+                b.u.push_back(0.0);
+                break;
+            }
+            const Vec3f A = st.col(2) * sd * sd;
+            const double b2 = b_norm * b_norm, ab = A.dot(B);
+            const double disc = ab * ab - b2 * (A.squaredNorm() - a_max * a_max);
+            const double u_acc = disc >= 0 ? (-ab - std::sqrt(disc)) / b2 : -ab / b2;
+            const double u_rate = u_prev - j_max * h / b_norm;
+            const double u_end = -std::sqrt(2.0 * j_max * v) / b_norm;
+            const double u = std::min(std::max({u_acc, u_rate, u_end}), 0.0);
+            b.s.push_back(s);
+            b.sd.push_back(sd);
+            b.u.push_back(u);
+            s = std::min(s + sd * h + 0.5 * u * h * h, total_dur);
+            sd = std::max(sd + u * h, 0.0);
+            u_prev = u;
+        }
+        b.stop_p = last_p;
+        stop_time = (b.s.size() - 1) * h;
+        const double start_yaw = yaw_traj.empty() ? NAN : yaw_traj.getPos(b.s.front())[0];
+        const double end_yaw = yaw_traj.empty() ? NAN : yaw_traj.getPos(b.s.back())[0];
+        b.stop_yaw = std::isnan(end_yaw) ? start_yaw : end_yaw;
+        b.pos_traj = pos_traj;
+        b.yaw_traj = yaw_traj;
+        stop_p = b.stop_p;
+        std::lock_guard<std::mutex> lck(brake_mutex_);
+        brake_ = std::move(b);
+        return true;
+    }
+
+    void SuperPlanner::getBrakeCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot, bool &finished) {
+        const double cur_t = ros_ptr_->getSimTime();
+        {
+            std::lock_guard<std::mutex> lck(brake_mutex_);
+            const size_t n = brake_.s.size();
+            const double t = std::max(cur_t - brake_.start_WT, 0.0);
+            const auto k = static_cast<size_t>(t / kBrakeDt);
+            finished = n == 0 || k + 1 >= n;
+            if (finished) {
+                pvaj.setZero();
+                pvaj.col(0) = brake_.stop_p;
+                yaw = brake_.stop_yaw;
+                yaw_dot = 0;
+            } else {
+                const double tau = t - k * kBrakeDt;
+                const double u = brake_.u[k];
+                const double s = brake_.s[k] + brake_.sd[k] * tau + 0.5 * u * tau * tau;
+                const double sd = std::max(brake_.sd[k] + u * tau, 0.0);
+                const double u_dot = (brake_.u[k + 1] - u) / kBrakeDt;
+                StatePVAJ st;
+                brake_.pos_traj.getState(s, st);
+                pvaj.col(0) = st.col(0);
+                pvaj.col(1) = st.col(1) * sd;
+                pvaj.col(2) = st.col(2) * sd * sd + st.col(1) * u;
+                pvaj.col(3) = st.col(3) * sd * sd * sd + 3.0 * st.col(2) * sd * u + st.col(1) * u_dot;
+                yaw = brake_.yaw_traj.empty() ? NAN : brake_.yaw_traj.getPos(s)[0];
+                yaw_dot = brake_.yaw_traj.empty() ? 0.0 : brake_.yaw_traj.getVel(s)[0] * sd;
+            }
+            if (std::isnan(yaw)) {
+                yaw = std::isnan(brake_.stop_yaw) ? 0.0 : brake_.stop_yaw;
+                yaw_dot = 0;
+            }
+            if (std::isnan(yaw_dot)) {
+                yaw_dot = 0;
+            }
+        }
+        if (cfg_.yaw_mode == Config::YAW_TO_POINT) {
+            applyLookAtYaw(pvaj.col(0), cur_t, false, yaw, yaw_dot);
+        }
+    }
+
+    void SuperPlanner::latchBrakeStopPoint() {
+        std::lock_guard<std::mutex> lck(brake_mutex_);
+        hold_p_ = brake_.stop_p;
+        hold_yaw_ = brake_.stop_yaw;
     }
 
     void SuperPlanner::setYawTarget(const Vec3f &p, const double &stamp_WT) {

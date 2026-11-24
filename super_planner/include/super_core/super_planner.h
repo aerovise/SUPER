@@ -127,6 +127,28 @@ namespace super_planner {
         void applyLookAtYaw(const Vec3f &cmd_p, const double &cur_WT, const bool &hold_fallback,
                             double &yaw, double &yaw_dot);
 
+        /* Brake: stop along the committed trajectory (prepareBrake / getBrakeCommand) */
+        // Integration step [s] of the brake profile; one sample is stored per step.
+        static constexpr double kBrakeDt = 0.001;
+        // Below this speed [m/s] the brake ends: the speed is set to 0 and the drone hovers.
+        static constexpr double kBrakeStopSpeed = 0.02;
+        // Cap on the profile length [s]. It is never reached with max_acc and max_jerk > 0 (5 m/s
+        // at 5 m/s^2 stops in about 1 s); if it were, the profile ends there with speed 0, so the
+        // command still ends in a hover, with a velocity step.
+        static constexpr double kBrakeMaxDuration = 10.0;
+        // The brake runs the committed trajectory on a slowed clock: the command at time t is the
+        // trajectory state at path time s(t), with s' = ds/dt falling from 1 to 0 (stored per step:
+        // s, s' and s'' = u). Written by prepareBrake, read by getBrakeCommand, under brake_mutex_.
+        struct BrakeProfile {
+            Trajectory pos_traj, yaw_traj;
+            double start_WT{0};
+            vector<double> s, sd, u;
+            Vec3f stop_p{0, 0, 0};
+            double stop_yaw{NAN};
+        };
+        std::mutex brake_mutex_;
+        BrakeProfile brake_;
+
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -170,6 +192,27 @@ namespace super_planner {
         /// zero velocity, acceleration and jerk, and the look-at yaw. Without a fresh target the
         /// last commanded yaw is held (yaw_dot 0).
         void getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot);
+
+        /// Plan a brake from now along the committed trajectory: the same path, slowed until the
+        /// speed is 0, with the commanded acceleration within traj_opt max_acc and its rate within
+        /// max_jerk (exp_traj limits). The path is the already checked trajectory, so the brake
+        /// keeps its clearance; it stops at or before the trajectory end (where the trajectory
+        /// itself is at rest). Returns false, planning nothing, when no trajectory is committed or
+        /// it has already been flown to its end (the drone is then at rest at its end). On
+        /// success, speed is the speed at the start [m/s], and stop_p, stop_dist [m] and
+        /// stop_time [s] describe where and when the drone stops. Thread-safe.
+        bool prepareBrake(const double &now_WT, double &speed, Vec3f &stop_p, double &stop_dist,
+                          double &stop_time);
+
+        /// Brake command at the current time from the last prepareBrake. finished is true once
+        /// the profile has ended: the command is then the stop point with zero velocity,
+        /// acceleration and jerk. With yaw_mode 3 the yaw comes from look-at as in
+        /// getOneCommandFromTraj. Thread-safe.
+        void getBrakeCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot, bool &finished);
+
+        /// Latch the brake's stop point as the hover point (see latchHoldPoint). Call from the cmd
+        /// output when getBrakeCommand reports finished.
+        void latchBrakeStopPoint();
 
         typedef std::shared_ptr<SuperPlanner> Ptr;
 
