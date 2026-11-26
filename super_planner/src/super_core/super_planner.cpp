@@ -424,7 +424,12 @@ namespace super_planner {
     /// - jerk while braking harder: the tangential deceleration |P'| u grows by at most
     ///   max_jerk per second;
     /// - jerk at the stop: the deceleration is at most sqrt(2 max_jerk v), so it falls to 0 as
-    ///   the speed v does and the stop has no acceleration step.
+    ///   the speed v does (a step of at most sqrt(2 max_jerk kBrakeStopSpeed) remains).
+    /// u <= 0 slows the path clock, not always the drone: where the committed trajectory itself
+    /// speeds up (|P'| rising along s), the speed v = |P'| s' can still rise briefly while the
+    /// deceleration ramps up at max_jerk, i.e. during the first max_acc / max_jerk (42 ms at
+    /// 5 m/s^2 and 120 m/s^3), by at most what the trajectory would have gained in that time.
+    /// Afterwards it falls. The jerk output on the last step is 0 (see getBrakeCommand).
     /// It ends, with s' = 0, at the first of: the speed drops below kBrakeStopSpeed; the path
     /// turns back on itself (P' reverses, as at the turn of a committed trajectory that runs past
     /// its goal and back: the trajectory itself is at rest there, so the drone stops at the turn
@@ -536,7 +541,12 @@ namespace super_planner {
                 pvaj.col(0) = st.col(0);
                 pvaj.col(1) = st.col(1) * sd;
                 pvaj.col(2) = st.col(2) * sd * sd + st.col(1) * u;
-                pvaj.col(3) = st.col(3) * sd * sd * sd + 3.0 * st.col(2) * sd * u + st.col(1) * u_dot;
+                // Last step (into the stop sample, where u is set to 0, also at a path reversal):
+                // the 1 ms difference u_dot would read as a jerk spike of up to ~490 m/s^3
+                // (sqrt(2 max_jerk kBrakeStopSpeed) / kBrakeDt), so no jerk is commanded there.
+                const bool last_step = k + 2 >= n;
+                pvaj.col(3) = last_step ? Vec3f::Zero().eval()
+                                        : (st.col(3) * sd * sd * sd + 3.0 * st.col(2) * sd * u + st.col(1) * u_dot).eval();
                 yaw = brake_.yaw_traj.empty() ? NAN : brake_.yaw_traj.getPos(s)[0];
                 yaw_dot = brake_.yaw_traj.empty() ? 0.0 : brake_.yaw_traj.getVel(s)[0] * sd;
             }

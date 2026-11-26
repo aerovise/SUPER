@@ -307,6 +307,10 @@ namespace fsm {
             if (machine_state_ == BRAKE && !(brake_for_hold_ && brake_seq_ == goal_seq_)) {
                 brake_for_hold_ = true;
                 brake_seq_ = goal_seq_;
+                // The gate below compares against click_p: without it, the follower's 1 Hz
+                // re-sends of the same hold point would pass it once hovering at the stop point
+                // (more than 0.1 m away) and fly the drone back to the hold point.
+                gi_.click_p = click_point;
                 ros_ptr_->info(" -- [Fsm] hold request while braking: hovering at the stop point when stopped.");
             }
             return;
@@ -383,6 +387,18 @@ namespace fsm {
             return false;
         }
         std::lock_guard<std::mutex> lck(brake_mutex_);
+        if (hold && machine_state_ == BRAKE) {
+            // A replan-failure brake started between the hold being stored and this call: make
+            // it end as a hold brake (hover at the stop point), as a hold arriving during BRAKE
+            // does. Without this, finishBrake would plan from rest back to the hold point.
+            std::lock_guard<std::mutex> glck(goal_mutex_);
+            if (machine_state_ == BRAKE && seq == goal_seq_) {
+                brake_for_hold_ = true;
+                brake_seq_ = seq;
+                ros_ptr_->info(" -- [Fsm] hold request while braking: hovering at the stop point when stopped.");
+            }
+            return false;
+        }
         if (machine_state_ != FOLLOW_TRAJ) {
             return false;
         }

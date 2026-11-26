@@ -189,7 +189,12 @@ namespace fsm {
         // along its own path (SuperPlanner::prepareBrake), sent by the cmd output; replans stop
         // (callReplanOnce runs only in FOLLOW_TRAJ). Triggers: an accepted hold request, and
         // replans failing for longer than brake_after_replan_fail while the goal differs from the
-        // committed one. brake_mutex_ serialises startBrake (goal callback and replan timer);
+        // committed one. No EMER check runs during BRAKE: with replans stopped, ReplanOnce no
+        // longer re-checks the committed path against the map, so the brake follows the path as
+        // it was checked when committed, for its stop time (speed / max_acc plus the 42 ms jerk
+        // ramp: about 1.1 s from 5 m/s). An obstacle that appears on that stretch meanwhile is not
+        // reacted to; the stretch is never longer than the rest of the committed trajectory,
+        // which upstream would fly at full speed. brake_mutex_ serialises startBrake (goal callback and replan timer);
         // startBrake takes goal_mutex_ inside it, never the other way round.
         std::mutex brake_mutex_;
         // goal_seq_ when the brake started, and whether a hold request started it or arrived
