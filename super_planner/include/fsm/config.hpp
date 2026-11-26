@@ -68,6 +68,13 @@ namespace fsm {
         // committed trajectory was planned for (see Fsm::callReplanOnce). No usable default: NaN
         // when missing, and FsmRos1::init exits unless finite and > 0.
         double brake_after_replan_fail{std::numeric_limits<double>::quiet_NaN()};
+        // geometry_msgs/PointStamped hold requests: stop and hover (see Fsm::applyHold). ROS1
+        // only. No default: empty when missing, and FsmRos1::init exits.
+        string hold_topic;
+        // A hold stamped more than this [s] in the past is logged as stale and still applied (the
+        // drone stops); one stamped more than this in the future, or unstamped, is taken as
+        // received now. NaN when missing, and FsmRos1::init exits unless finite and > 0.
+        double hold_max_age{std::numeric_limits<double>::quiet_NaN()};
 
         Config() = default;
 
@@ -90,6 +97,8 @@ namespace fsm {
                              std::numeric_limits<double>::quiet_NaN());
             loader.LoadParam("fsm/brake_after_replan_fail", brake_after_replan_fail,
                              std::numeric_limits<double>::quiet_NaN());
+            loader.LoadParam("fsm/hold_topic", hold_topic, string(""));
+            loader.LoadParam("fsm/hold_max_age", hold_max_age, std::numeric_limits<double>::quiet_NaN());
 
 
             loader.LoadParam("super_planner/yaw_dot_max", yaw_dot_max, 1.0, true);

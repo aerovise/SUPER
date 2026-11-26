@@ -27,8 +27,16 @@ fsm:
   # for, the drone brakes along that trajectory (within traj_opt max_acc/max_jerk) and hovers where
   # it stops, then plans from rest toward the latest goal. Upstream kept flying the old trajectory
   # at speed ("force return"); with an unchanged goal it still does. 0.3 s is about 4 failed replans
-  # at replan_rate 15. An accepted hold request brakes the same way at once.
+  # at replan_rate 15. A hold request (hold_topic) brakes the same way at once.
   brake_after_replan_fail: 0.3
+  # tracker-drone: new, required (the node exits if missing; hold_max_age must be finite and > 0).
+  # geometry_msgs/PointStamped hold requests from the follower: each one stops the drone (brake
+  # along the flown trajectory, or hover where it is when at rest), whatever its distance. A hold
+  # stamped more than hold_max_age [s] ago is logged as stale and still applied; one stamped more
+  # than that in the future, or unstamped, counts as received now. A goal stamped at or before
+  # the last hold is ignored; a hold stamped before the last goal is ignored.
+  hold_topic: "/planning/hold"
+  hold_max_age: 0.5
   click_yaw_en: true
   replan_rate: 15.0
   cmd_topic: "/planning/pos_cmd"

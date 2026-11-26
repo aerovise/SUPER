@@ -399,15 +399,19 @@ namespace super_planner {
     void SuperPlanner::latchHoldPoint() {
         cmd_traj_info_.lock();
         const double total_dur = cmd_traj_info_.getTotalDuration();
-        hold_p_ = cmd_traj_info_.posTraj().getPos(total_dur);
-        hold_yaw_ = cmd_traj_info_.getYaw(total_dur)[0];
+        const Vec3f p = cmd_traj_info_.posTraj().getPos(total_dur);
+        const double y = cmd_traj_info_.getYaw(total_dur)[0];
         cmd_traj_info_.unlock();
+        latchHoldAt(p, y);
     }
 
     void SuperPlanner::getHoldCommand(StatePVAJ &pvaj, double &yaw, double &yaw_dot) {
         pvaj.setZero();
-        pvaj.col(0) = hold_p_;
-        yaw = hold_yaw_;
+        {
+            std::lock_guard<std::mutex> lck(hold_mutex_);
+            pvaj.col(0) = hold_p_;
+            yaw = hold_yaw_;
+        }
         yaw_dot = 0;
         if (std::isnan(yaw)) {
             yaw = std::isnan(look_at_yaw_) ? 0.0 : look_at_yaw_;
@@ -564,9 +568,14 @@ namespace super_planner {
     }
 
     void SuperPlanner::latchBrakeStopPoint() {
-        std::lock_guard<std::mutex> lck(brake_mutex_);
-        hold_p_ = brake_.stop_p;
-        hold_yaw_ = brake_.stop_yaw;
+        Vec3f p;
+        double y;
+        {
+            std::lock_guard<std::mutex> lck(brake_mutex_);
+            p = brake_.stop_p;
+            y = brake_.stop_yaw;
+        }
+        latchHoldAt(p, y);
     }
 
     void SuperPlanner::setYawTarget(const Vec3f &p, const double &stamp_WT) {

@@ -182,15 +182,13 @@ namespace fsm {
                 break;
             }
             case WAIT_GOAL: {
-                bool new_goal;
                 {
+                    // Checked and changed under goal_mutex_: a hold (applyHold) clears new_goal
+                    // under it, so it never races this into GENERATE_TRAJ.
                     std::lock_guard<std::mutex> lck(goal_mutex_);
-                    new_goal = gi_.new_goal;
-                }
-                if (!new_goal) {
-                    return;
-                } else {
-                    ChangeState("MainFsmCallback", GENERATE_TRAJ);
+                    if (!gi_.new_goal || !changeStateFrom("MainFsmCallback", WAIT_GOAL, GENERATE_TRAJ)) {
+                        return;
+                    }
                 }
                 resetVisualizedPath();
                 break;
@@ -223,10 +221,17 @@ namespace fsm {
                     return;
                 }
                 if (retcode == SUCCESS || retcode == FINISH) {
-                    plan_from_rest_ = true;
-                    committed_seq_ = seq;
                     {
+                        // Swapped from GENERATE_TRAJ under goal_mutex_: if a hold moved the state
+                        // to WAIT_GOAL meanwhile (applyHold), this trajectory is not flown.
                         std::lock_guard<std::mutex> lck(goal_mutex_);
+                        if (!changeStateFrom("MainFsmCallback", GENERATE_TRAJ, FOLLOW_TRAJ)) {
+                            cout << YELLOW << " -- [Fsm] PlanFromRest result dropped: state changed (hold)."
+                                 << RESET << endl;
+                            return;
+                        }
+                        plan_from_rest_ = true;
+                        committed_seq_ = seq;
                         if (seq == goal_seq_) {
                             gi_.new_goal = false;
                             finish_plan = retcode == FINISH;
@@ -234,8 +239,6 @@ namespace fsm {
                     }
 
                     publishPolyTraj();
-
-                    ChangeState("MainFsmCallback", FOLLOW_TRAJ);
                 } else {
                     cout << YELLOW << " -- [Fsm] PlanFromRest failed, try replan." << RESET << endl;
                     // ros::Duration(0.1).sleep();
@@ -266,7 +269,14 @@ namespace fsm {
         return dis < thresh_dis;
     }
 
-    void Fsm::setGoalPosiAndYaw(const Vec3f &p, const Quatf &q) {
+    void Fsm::setGoalPosiAndYaw(const Vec3f &p, const Quatf &q, const double &stamp_in) {
+        // Ordering stamp: unstamped, or more than hold_max_age in the future, counts as now (a
+        // future stamp must not outrank every later hold).
+        const double now = ros_ptr_->getSimTime();
+        double stamp = stamp_in;
+        if (!std::isfinite(stamp) || stamp == 0 || stamp > now + cfg_.hold_max_age) {
+            stamp = now;
+        }
 
         auto click_point = p;
         if (cfg_.click_height > -5) {
@@ -286,39 +296,27 @@ namespace fsm {
         const MACHINE_STATE state = machine_state_;
         const bool flying = state == GENERATE_TRAJ || state == FOLLOW_TRAJ || state == BRAKE;
 
-        // At rest, a goal within 0.1 m of the robot is skipped (upstream behaviour). While flying,
-        // it is a hold request ("stop and hover here"): it bypasses the regoal_dist gate below and
-        // always replaces the current goal; the planner brings the drone to rest at it and the FSM
-        // ends in WAIT_GOAL. A follower should latch the hold point: re-sending the live drone
-        // position while braking makes every message a new hold goal and forces a replan each time.
+        // At rest, a goal within 0.1 m of the robot is skipped (upstream behaviour). While flying
+        // it is an ordinary goal: holds come only on the hold topic (applyHold), never inferred
+        // from a goal's distance to the drone (that rule missed holds that reached SUPER after
+        // the drone had moved more than 0.1 m, and turned close follow goals into holds).
         const bool near_robot = (robot_p - goal_p).norm() < 0.1;
         if (!flying && near_robot) {
-            return;
-        }
-        const bool hold = flying && near_robot;
-        // While braking the drone is already stopping, so a hold request starts nothing new. If
-        // the brake was started by failing replans, it would end by planning from rest toward the
-        // goal that failed; a hold request makes it end as a hold brake instead: hovering at the
-        // stop point (finishBrake). Checked again under goal_mutex_, which finishBrake also holds
-        // when it leaves BRAKE; if the brake has ended meanwhile, the drone is at rest at the stop
-        // point and the request is skipped as any goal near the robot at rest.
-        if (hold && state == BRAKE) {
-            std::lock_guard<std::mutex> lck(goal_mutex_);
-            if (machine_state_ == BRAKE && !(brake_for_hold_ && brake_seq_ == goal_seq_)) {
-                brake_for_hold_ = true;
-                brake_seq_ = goal_seq_;
-                // The gate below compares against click_p: without it, the follower's 1 Hz
-                // re-sends of the same hold point would pass it once hovering at the stop point
-                // (more than 0.1 m away) and fly the drone back to the hold point.
-                gi_.click_p = click_point;
-                ros_ptr_->info(" -- [Fsm] hold request while braking: hovering at the stop point when stopped.");
-            }
             return;
         }
 
         // Held until the goal is stored: gi_, finish_plan and goal_seq_ change together (see
         // goal_mutex_). closeToGoal() also takes goal_mutex_, so it is not called below.
         std::unique_lock<std::mutex> lck(goal_mutex_);
+
+        // A goal stamped at or before the last hold is older than it (or sent with it): ignored,
+        // so a late goal never undoes a stop. The follower's next goal after a hold is newer.
+        if (stamp <= last_hold_stamp_) {
+            ros_ptr_->info(" -- [Fsm] goal stamped {:.3f} s, not after the last hold ({:.3f} s): ignored.", stamp,
+                           last_hold_stamp_);
+            return;
+        }
+        last_goal_stamp_ = std::max(last_goal_stamp_, stamp);
 
         // Moving-goal gate. While the current goal is being flown to, or has been reached, a goal
         // within regoal_dist of it is ignored entirely (goal, yaw and new_goal untouched), so a
@@ -328,16 +326,11 @@ namespace fsm {
         // goals apart by more than regoal_dist. The comparison is always against the last
         // accepted goal, so slow drift is accepted once it adds up past regoal_dist. Not gated:
         // the first goal, and WAIT_GOAL away from the goal (after an invalid goal or an
-        // emergency stop), so a repeated goal there retries planning, and hold requests.
+        // emergency stop), so a repeated goal there retries planning. After a hold, the goal and
+        // click_p are the position where the drone stopped (applyHold, finishBrake).
         const bool goal_active = flying || (state == WAIT_GOAL &&
                                             (robot_p - gi_.goal_p).norm() < cfg_.regoal_dist);
-        if (!hold && started_ && goal_active && (click_point - gi_.click_p).norm() <= cfg_.regoal_dist) {
-            return;
-        }
-        // A hold request within 0.2 m (twice the hold radius) of the current goal changes nothing:
-        // the drone already stops there. Ignoring it keeps a goal stream that sits on the drone
-        // while it arrives at its goal (still FOLLOW_TRAJ) from forcing a replan per message.
-        if (hold && started_ && (goal_p - gi_.goal_p).norm() <= 0.2) {
+        if (started_ && goal_active && (click_point - gi_.click_p).norm() <= cfg_.regoal_dist) {
             return;
         }
 
@@ -368,17 +361,96 @@ namespace fsm {
         // goal has moved, so resume replanning toward it.
         finish_plan = false;
         goal_seq_++;
-        const uint64_t seq = goal_seq_;
-        lck.unlock();
+    }
 
-        // Hold brake. An accepted hold while a trajectory is flown (FOLLOW_TRAJ) means "stop
-        // now": upstream would replan toward the hold point, and while replans fail it keeps
-        // flying the committed trajectory at speed. Instead the rest of the trajectory is replaced
-        // by a brake along it, and the drone hovers where it stops (not at the hold point, which
-        // it has passed by then; see finishBrake). In GENERATE_TRAJ nothing is flown, so the hold
-        // is planned from rest as upstream.
-        if (hold) {
-            startBrake("hold", seq, true);
+    void Fsm::applyHold(const double &stamp) {
+        if (!brakeSupported()) {
+            return;
+        }
+        Vec3f robot_p;
+        double robot_yaw;
+        {
+            std::lock_guard<std::mutex> lck(robot_state_mutex_);
+            robot_p = robot_state_.p;
+            robot_yaw = robot_state_.yaw;
+        }
+        // Whole hold under brake_mutex_: a replan-failure startBrake cannot interleave.
+        std::lock_guard<std::mutex> blck(brake_mutex_);
+        uint64_t seq;
+        {
+            std::lock_guard<std::mutex> lck(goal_mutex_);
+            if (stamp < last_goal_stamp_) {
+                // The follower sent a goal after this hold: that goal is its latest request (a
+                // follower goal keeps min_standoff from the person). Only an out-of-order or
+                // stale hold gets here.
+                ros_ptr_->warn(" -- [Fsm] hold stamped {:.3f} s, before the last goal ({:.3f} s): ignored, "
+                               "the newer goal stands.", stamp, last_goal_stamp_);
+                return;
+            }
+            last_hold_stamp_ = std::max(last_hold_stamp_, stamp);
+            const MACHINE_STATE state = machine_state_;
+            if (state == INIT) {
+                ros_ptr_->info(" -- [Fsm] hold before any goal: nothing is flown, nothing to do.");
+                return;
+            }
+            // Stop here: replans stop, and no state plans toward the old goal any more.
+            gi_.goal_p = robot_p;
+            gi_.click_p = robot_p;
+            gi_.new_goal = false;
+            finish_plan = true;
+            goal_seq_++;
+            seq = goal_seq_;
+            if (state == BRAKE) {
+                brake_for_hold_ = true;
+                brake_seq_ = seq;
+                ros_ptr_->info(" -- [Fsm] BRAKE (hold): already braking; hovering at the stop point when stopped.");
+                return;
+            }
+            if (state != FOLLOW_TRAJ) {
+                holdAtRestLocked(state, robot_p, robot_yaw);
+                return;
+            }
+        }
+        if (startBrakeLocked("hold", seq, true)) {
+            return;
+        }
+        // No brake: the trajectory was flown to its end, or the cmd or replan timer changed the
+        // state meanwhile. Handled as the state now; in FOLLOW_TRAJ at the trajectory end the cmd
+        // output ends it (goal = here: WAIT_GOAL hovering at the end, or GENERATE_TRAJ, which
+        // stops at a goal within 0.1 m and otherwise plans from rest to where the hold found it).
+        std::lock_guard<std::mutex> lck(goal_mutex_);
+        const MACHINE_STATE state = machine_state_;
+        if (state == BRAKE) {
+            brake_for_hold_ = true;
+            brake_seq_ = seq;
+        } else if (state != FOLLOW_TRAJ) {
+            holdAtRestLocked(state, robot_p, robot_yaw);
+        } else {
+            ros_ptr_->info(" -- [Fsm] hold: trajectory at its end, stopping there.");
+        }
+    }
+
+    void Fsm::holdAtRestLocked(const MACHINE_STATE &state, const Vec3f &robot_p, const double &robot_yaw) {
+        if (state == WAIT_GOAL || state == GENERATE_TRAJ) {
+            // Keep an existing hover that still holds the drone; else hover where it is now.
+            const bool keep = state == WAIT_GOAL && hold_cmd_valid_ &&
+                              (planner_ptr_->getHoldPoint() - robot_p).norm() <= cfg_.hover_max_offset;
+            if (!keep) {
+                planner_ptr_->latchHoldAt(robot_p, robot_yaw);
+            }
+            hold_cmd_valid_ = true;
+            // A plan from rest in progress is not flown: GENERATE_TRAJ -> FOLLOW_TRAJ is a swap
+            // from GENERATE_TRAJ under goal_mutex_ (callMainFsmOnce), which now fails.
+            if (state == GENERATE_TRAJ) {
+                changeStateFrom("applyHold", GENERATE_TRAJ, WAIT_GOAL);
+            }
+            const Vec3f hp = planner_ptr_->getHoldPoint();
+            ros_ptr_->info(" -- [Fsm] HOLD at rest ({}): hovering at [{:.2f}, {:.2f}, {:.2f}].",
+                           MACHINE_STATE_STR[int(state)], hp.x(), hp.y(), hp.z());
+        } else {
+            // EMER_STOP (one tick, then WAIT_GOAL with nothing to plan) or YAWING (unused).
+            ros_ptr_->info(" -- [Fsm] HOLD in {}: goal set to the current position, no hover latched.",
+                           MACHINE_STATE_STR[int(state)]);
         }
     }
 
@@ -387,6 +459,10 @@ namespace fsm {
             return false;
         }
         std::lock_guard<std::mutex> lck(brake_mutex_);
+        return startBrakeLocked(trigger, seq, hold);
+    }
+
+    bool Fsm::startBrakeLocked(const char *trigger, const uint64_t &seq, const bool &hold) {
         if (hold && machine_state_ == BRAKE) {
             // A replan-failure brake started between the hold being stored and this call: make
             // it end as a hold brake (hover at the stop point), as a hold arriving during BRAKE
@@ -433,7 +509,7 @@ namespace fsm {
         hold_cmd_valid_ = true;
         {
             // The state changes under goal_mutex_ too, so a hold request arriving now either
-            // still sees BRAKE and is applied below (setGoalPosiAndYaw), or sees WAIT_GOAL.
+            // still sees BRAKE and marks it (applyHold), or sees WAIT_GOAL and keeps this hover.
             std::lock_guard<std::mutex> lck(goal_mutex_);
             if (brake_for_hold_ && brake_seq_ == goal_seq_) {
                 gi_.goal_p = stop_p;

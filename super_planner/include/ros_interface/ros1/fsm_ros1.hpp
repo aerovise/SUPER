@@ -45,7 +45,7 @@
 namespace fsm {
     class FsmRos1 : public Fsm {
         ros::NodeHandle nh_;
-        ros::Subscriber goal_sub_, yaw_target_sub_;
+        ros::Subscriber goal_sub_, yaw_target_sub_, hold_sub_;
         ros::Publisher cmd_pub, mpc_cmd_pub_, path_pub_;
         ros::Timer execution_timer_, replan_timer_, cmd_timer_;
         quadrotor_msgs::PositionCommand pid_cmd_;
@@ -297,7 +297,39 @@ namespace fsm {
             super_utils::Vec3f goal_p = Vec3f{msg->pose.position.x, msg->pose.position.y, msg->pose.position.z};
             super_utils::Quatf goal_q = super_utils::Quatf{msg->pose.orientation.w, msg->pose.orientation.x,
                                                            msg->pose.orientation.y, msg->pose.orientation.z};
-            setGoalPosiAndYaw(goal_p, goal_q);
+            setGoalPosiAndYaw(goal_p, goal_q, msg->header.stamp.toSec());
+        }
+
+        /// Hold request (fsm/hold_topic): stop and hover, whatever the distance to the drone
+        /// (Fsm::applyHold). Every message stops the drone; nothing in it can make the drone keep
+        /// flying. Its point is never flown to (applyHold uses where the drone stops), so a NaN
+        /// point or a frame other than "world" is only logged. Its stamp orders it against goals:
+        /// - zero (unstamped) or more than hold_max_age in the future: taken as now, so a bad
+        ///   clock cannot outrank every later goal and hold the drone forever;
+        /// - more than hold_max_age old: logged as stale and still applied; it is ignored only if
+        ///   a goal with a newer stamp has already come in (the follower's later request).
+        void holdCallback(const geometry_msgs::PointStampedConstPtr &msg) {
+            const double now = ros::Time::now().toSec();
+            double stamp = msg->header.stamp.toSec();
+            if (msg->header.stamp.isZero()) {
+                ROS_WARN_THROTTLE(1.0, " -- [Fsm] hold request without a stamp: taken as now.");
+                stamp = now;
+            } else if (stamp > now + cfg_.hold_max_age) {
+                ROS_WARN_THROTTLE(1.0, " -- [Fsm] hold request stamped %.3f s in the future: taken as now.",
+                                  stamp - now);
+                stamp = now;
+            } else if (now - stamp > cfg_.hold_max_age) {
+                ROS_WARN_THROTTLE(1.0, " -- [Fsm] hold request %.3f s old (> %.2f s): applied (stop).",
+                                  now - stamp, cfg_.hold_max_age);
+            }
+            if (msg->header.frame_id != "world") {
+                ROS_WARN_THROTTLE(1.0, " -- [Fsm] hold request in frame '%s', expected 'world': point unused, "
+                                       "applied (stop).", msg->header.frame_id.c_str());
+            }
+            if (!std::isfinite(msg->point.x) || !std::isfinite(msg->point.y) || !std::isfinite(msg->point.z)) {
+                ROS_WARN_THROTTLE(1.0, " -- [Fsm] hold request with a non-finite point: point unused, applied (stop).");
+            }
+            applyHold(stamp);
         }
 
         void yawTargetCallback(const geometry_msgs::PointStampedConstPtr &msg) {
@@ -353,6 +385,18 @@ namespace fsm {
                 std::fflush(stdout);
                 std::_Exit(EXIT_FAILURE);
             }
+
+            // Hold requests need their topic and stamp limit; never guess them.
+            if (cfg_.hold_topic.empty() || !std::isfinite(cfg_.hold_max_age) || !(cfg_.hold_max_age > 0)) {
+                ROS_FATAL(" -- [Fsm] invalid config: fsm/hold_topic = '%s' must be set and fsm/hold_max_age = %f "
+                          "finite and > 0. Exiting.", cfg_.hold_topic.c_str(), cfg_.hold_max_age);
+                std::cout.flush();
+                std::fflush(stdout);
+                std::_Exit(EXIT_FAILURE);
+            }
+            // Queue 10: holds are rare and each one matters (goal_sub_ keeps only the newest).
+            hold_sub_ = nh_.subscribe(cfg_.hold_topic, 10, &FsmRos1::holdCallback, this);
+            cout << YELLOW << " -- [Fsm] HOLD topic: " << cfg_.hold_topic << RESET << endl;
 
             if (cmd_cnt != 1) {
                 cout << YELLOW << " -- [Fsm] CMD INPUT ERROR." << RESET << endl;

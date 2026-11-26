@@ -2,6 +2,10 @@ fsm:
   # aerovise: required by the ROS1 FSM (exits if missing). Brake along the trajectory when replans
   # fail for longer than this [s] with a goal other than the one it was planned for.
   brake_after_replan_fail: 0.3
+  # aerovise: required by the ROS1 FSM (exits if missing). Hold requests (stop and hover) and the
+  # stamp age [s] beyond which they are logged as stale (still applied).
+  hold_topic: "/planning/hold"
+  hold_max_age: 0.5
   click_goal_en: true
   click_goal_topic: "/goal"
   click_height: 1.5

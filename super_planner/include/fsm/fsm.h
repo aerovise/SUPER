@@ -187,7 +187,7 @@ namespace fsm {
 
         // Brake (FOLLOW_TRAJ -> BRAKE -> WAIT_GOAL): the committed trajectory is replaced by a stop
         // along its own path (SuperPlanner::prepareBrake), sent by the cmd output; replans stop
-        // (callReplanOnce runs only in FOLLOW_TRAJ). Triggers: an accepted hold request, and
+        // (callReplanOnce runs only in FOLLOW_TRAJ). Triggers: a hold request (applyHold), and
         // replans failing for longer than brake_after_replan_fail while the goal differs from the
         // committed one. No EMER check runs during BRAKE: with replans stopped, ReplanOnce no
         // longer re-checks the committed path against the map, so the brake follows the path as
@@ -221,6 +221,37 @@ namespace fsm {
         /// is not needed (BRAKE: already braking) or not possible (GENERATE_TRAJ: no trajectory is
         /// flown, nothing is published), and after the trajectory end the drone is at rest there.
         bool startBrake(const char *trigger, const uint64_t &seq, const bool &hold);
+        /// startBrake with brake_mutex_ already held.
+        bool startBrakeLocked(const char *trigger, const uint64_t &seq, const bool &hold);
+
+        // Hold/goal ordering, under goal_mutex_: the newest hold stamp and the newest stamp of a
+        // goal that passed the ordering check (ROS time [s]). A goal stamped at or before the last
+        // hold is ignored; a hold stamped before the last such goal is ignored (the goal is the
+        // newer request). -inf until the first of each.
+        double last_hold_stamp_{-std::numeric_limits<double>::infinity()};
+        double last_goal_stamp_{-std::numeric_limits<double>::infinity()};
+
+        /// A hold request ("stop and hover", hold topic), whatever the distance to the drone.
+        /// stamp is its ROS time (already checked by the ROS layer: see FsmRos1::holdCallback);
+        /// its point is not used: the drone stops where it can, not at a point it may have passed.
+        /// Ignored only when a goal with a newer stamp was received (the follower moved on), or
+        /// in INIT (nothing flown yet). Otherwise the goal becomes the current position, replans
+        /// stop (finish_plan), and by state:
+        /// - FOLLOW_TRAJ: brake along the committed trajectory, hover at the stop point
+        ///   (finishBrake). If the brake cannot start (trajectory flown to its end, or the state
+        ///   changed meanwhile), handled as the state found then.
+        /// - BRAKE: the brake ends hovering at its stop point (as a hold brake).
+        /// - WAIT_GOAL, GENERATE_TRAJ (at rest, nothing flown): hover at the current position
+        ///   (kept if already hovering within hover_max_offset of the latched point), leaving
+        ///   GENERATE_TRAJ for WAIT_GOAL so a plan from rest in progress is not flown. The hover
+        ///   is subject to the cmd output's odometry-age and offset guards (else nothing is
+        ///   published and the controller keeps its last setpoint).
+        /// - EMER_STOP: the goal becomes the current position, so WAIT_GOAL (next tick) plans
+        ///   nothing; no hover is latched (the drone may still be moving on its backup stop).
+        /// Serialised with startBrake by brake_mutex_.
+        void applyHold(const double &stamp);
+        /// applyHold for a state other than FOLLOW_TRAJ and BRAKE, under goal_mutex_.
+        void holdAtRestLocked(const MACHINE_STATE &state, const Vec3f &robot_p, const double &robot_yaw);
 
         /// Called by the cmd output when the brake profile has ended and the stop point is latched
         /// as the hover point: BRAKE -> WAIT_GOAL with the hover command valid. After a hold
@@ -243,7 +274,10 @@ namespace fsm {
 
         bool closeToGoal(const double &thresh_dis);
 
-        void setGoalPosiAndYaw(const Vec3f &p, const Quatf &q);
+        /// stamp: the goal's ROS time [s]; NaN or 0 (unstamped, e.g. callPlanOnce, ROS2) or more
+        /// than hold_max_age in the future: taken as now. Used only for ordering against holds.
+        void setGoalPosiAndYaw(const Vec3f &p, const Quatf &q,
+                               const double &stamp = std::numeric_limits<double>::quiet_NaN());
 
         void ChangeState(const string &call_func, const MACHINE_STATE &new_state);
 

@@ -119,8 +119,10 @@ namespace super_planner {
         double look_at_yaw_{NAN};   // last commanded yaw, continuous (not wrapped); NAN until the first command
         double look_at_last_WT_{-1};
         bool look_at_hold_{false};  // inside the hold radius (hysteresis state)
-        // Hover point latched by latchHoldPoint() when a trajectory ends. Written and read only by
-        // the cmd output (FsmRos1::pubCmdTimerCallback / getPoseFromTraj, never concurrent).
+        // Hover point latched by latchHoldPoint() when a trajectory ends, by latchBrakeStopPoint()
+        // when a brake ends (both from the cmd output), and by latchHoldAt() on a hold request
+        // (hold topic callback). Read by the cmd output. Guarded by hold_mutex_.
+        mutable std::mutex hold_mutex_;
         Vec3f hold_p_{0, 0, 0};
         double hold_yaw_{NAN};
 
@@ -186,8 +188,17 @@ namespace super_planner {
         /// point. Call when the trajectory has just been flown to its end.
         void latchHoldPoint();
 
-        const Vec3f &getHoldPoint() const {
+        Vec3f getHoldPoint() const {
+            std::lock_guard<std::mutex> lck(hold_mutex_);
             return hold_p_;
+        }
+
+        /// Latch p (yaw: the yaw to hold, NaN for the look-at yaw only) as the hover point: a
+        /// hold request while hovering or idle, or while planning from rest. Thread-safe.
+        void latchHoldAt(const Vec3f &p, const double &yaw) {
+            std::lock_guard<std::mutex> lck(hold_mutex_);
+            hold_p_ = p;
+            hold_yaw_ = yaw;
         }
 
         /// yaw_mode 3 hover command: the latched hover point (never the live trajectory) with
