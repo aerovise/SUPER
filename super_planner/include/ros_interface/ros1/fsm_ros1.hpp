@@ -303,11 +303,11 @@ namespace fsm {
         /// Hold request (fsm/hold_topic): stop and hover, whatever the distance to the drone
         /// (Fsm::applyHold). Every message stops the drone; nothing in it can make the drone keep
         /// flying. Its point is never flown to (applyHold uses where the drone stops), so a NaN
-        /// point or a frame other than "world" is only logged. Its stamp orders it against goals:
+        /// point or a frame other than "world" is only logged. The hold is always applied; its
+        /// stamp only makes goals stamped at or before it ignored:
         /// - zero (unstamped) or more than hold_max_age in the future: taken as now, so a bad
-        ///   clock cannot outrank every later goal and hold the drone forever;
-        /// - more than hold_max_age old: logged as stale and still applied; it is ignored only if
-        ///   a goal with a newer stamp has already come in (the follower's later request).
+        ///   clock cannot make every later goal ignored;
+        /// - more than hold_max_age old: logged as stale and applied.
         void holdCallback(const geometry_msgs::PointStampedConstPtr &msg) {
             const double now = ros::Time::now().toSec();
             double stamp = msg->header.stamp.toSec();

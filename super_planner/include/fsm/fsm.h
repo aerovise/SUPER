@@ -224,18 +224,20 @@ namespace fsm {
         /// startBrake with brake_mutex_ already held.
         bool startBrakeLocked(const char *trigger, const uint64_t &seq, const bool &hold);
 
-        // Hold/goal ordering, under goal_mutex_: the newest hold stamp and the newest stamp of a
-        // goal that passed the ordering check (ROS time [s]). A goal stamped at or before the last
-        // hold is ignored; a hold stamped before the last such goal is ignored (the goal is the
-        // newer request). -inf until the first of each.
+        // Hold/goal ordering, under goal_mutex_: the newest hold stamp (ROS time [s]), kept <= the
+        // clock; -inf until the first hold, and again after a backward clock step. A goal stamped
+        // at or before it is ignored. Holds themselves are never ignored.
         double last_hold_stamp_{-std::numeric_limits<double>::infinity()};
-        double last_goal_stamp_{-std::numeric_limits<double>::infinity()};
+        // Goals ignored by that rule since the last summary log, and when it was written.
+        uint64_t ignored_goals_{0};
+        double last_ignored_log_{-std::numeric_limits<double>::infinity()};
 
         /// A hold request ("stop and hover", hold topic), whatever the distance to the drone.
         /// stamp is its ROS time (already checked by the ROS layer: see FsmRos1::holdCallback);
         /// its point is not used: the drone stops where it can, not at a point it may have passed.
-        /// Ignored only when a goal with a newer stamp was received (the follower moved on), or
-        /// in INIT (nothing flown yet). Otherwise the goal becomes the current position, replans
+        /// Never ignored, whatever its stamp; the stamp (kept <= the clock) only makes goals
+        /// stamped at or before it ignored. Does nothing in INIT (nothing flown yet). Otherwise
+        /// the goal becomes the current position, replans
         /// stop (finish_plan), and by state:
         /// - FOLLOW_TRAJ: brake along the committed trajectory, hover at the stop point
         ///   (finishBrake). If the brake cannot start (trajectory flown to its end, or the state
@@ -275,7 +277,8 @@ namespace fsm {
         bool closeToGoal(const double &thresh_dis);
 
         /// stamp: the goal's ROS time [s]; NaN or 0 (unstamped, e.g. callPlanOnce, ROS2) or more
-        /// than hold_max_age in the future: taken as now. Used only for ordering against holds.
+        /// than hold_max_age in the future: taken as now. Used only to ignore a goal stamped at or
+        /// before the last hold.
         void setGoalPosiAndYaw(const Vec3f &p, const Quatf &q,
                                const double &stamp = std::numeric_limits<double>::quiet_NaN());
 

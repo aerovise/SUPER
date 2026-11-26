@@ -311,12 +311,29 @@ namespace fsm {
 
         // A goal stamped at or before the last hold is older than it (or sent with it): ignored,
         // so a late goal never undoes a stop. The follower's next goal after a hold is newer.
+        // last_hold_stamp_ is stored <= the clock (applyHold), so a stored stamp ahead of the
+        // clock means the clock stepped back (sim restart, NTP): stamps across the step cannot be
+        // compared, so the ordering restarts and this goal is taken. The hold already applied
+        // stays applied until then (the drone hovers), and this goal is the sender's newest
+        // request; without the reset every goal would be ignored until the clock caught up.
+        const double now_locked = ros_ptr_->getSimTime();
+        if (last_hold_stamp_ > now_locked) {
+            ros_ptr_->warn(" -- [Fsm] last hold stamped {:.3f} s, after the clock ({:.3f} s): the clock stepped "
+                           "back; goal/hold ordering restarts.", last_hold_stamp_, now_locked);
+            last_hold_stamp_ = -std::numeric_limits<double>::infinity();
+        }
         if (stamp <= last_hold_stamp_) {
-            ros_ptr_->info(" -- [Fsm] goal stamped {:.3f} s, not after the last hold ({:.3f} s): ignored.", stamp,
-                           last_hold_stamp_);
+            // The follower keeps sending goals for a moment around a hold (10 Hz): one summary
+            // line per second, not one per goal.
+            ignored_goals_++;
+            if (now_locked - last_ignored_log_ >= 1.0) {
+                ros_ptr_->info(" -- [Fsm] {} goal(s) stamped at or before the last hold ({:.3f} s) ignored "
+                               "(latest stamped {:.3f} s).", ignored_goals_, last_hold_stamp_, stamp);
+                ignored_goals_ = 0;
+                last_ignored_log_ = now_locked;
+            }
             return;
         }
-        last_goal_stamp_ = std::max(last_goal_stamp_, stamp);
 
         // Moving-goal gate. While the current goal is being flown to, or has been reached, a goal
         // within regoal_dist of it is ignored entirely (goal, yaw and new_goal untouched), so a
@@ -379,15 +396,12 @@ namespace fsm {
         uint64_t seq;
         {
             std::lock_guard<std::mutex> lck(goal_mutex_);
-            if (stamp < last_goal_stamp_) {
-                // The follower sent a goal after this hold: that goal is its latest request (a
-                // follower goal keeps min_standoff from the person). Only an out-of-order or
-                // stale hold gets here.
-                ros_ptr_->warn(" -- [Fsm] hold stamped {:.3f} s, before the last goal ({:.3f} s): ignored, "
-                               "the newer goal stands.", stamp, last_goal_stamp_);
-                return;
-            }
-            last_hold_stamp_ = std::max(last_hold_stamp_, stamp);
+            // Every hold is applied, whatever its stamp (never dropped). Its stamp only makes
+            // older goals ignored (setGoalPosiAndYaw). Stored <= the clock: a hold stamped up to
+            // hold_max_age ahead, or a stored stamp left ahead by a backward clock step, cannot
+            // make later goals wait for the clock to catch up.
+            const double now_locked = ros_ptr_->getSimTime();
+            last_hold_stamp_ = std::min(std::max(last_hold_stamp_, stamp), now_locked);
             const MACHINE_STATE state = machine_state_;
             if (state == INIT) {
                 ros_ptr_->info(" -- [Fsm] hold before any goal: nothing is flown, nothing to do.");

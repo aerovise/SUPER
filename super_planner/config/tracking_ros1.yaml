@@ -34,7 +34,7 @@ fsm:
   # along the flown trajectory, or hover where it is when at rest), whatever its distance. A hold
   # stamped more than hold_max_age [s] ago is logged as stale and still applied; one stamped more
   # than that in the future, or unstamped, counts as received now. A goal stamped at or before
-  # the last hold is ignored; a hold stamped before the last goal is ignored.
+  # the last hold is ignored; holds are never ignored.
   hold_topic: "/planning/hold"
   hold_max_age: 0.5
   click_yaw_en: true
