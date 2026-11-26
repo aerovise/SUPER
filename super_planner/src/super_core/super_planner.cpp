@@ -425,16 +425,23 @@ namespace super_planner {
     ///   max_jerk per second;
     /// - jerk at the stop: the deceleration is at most sqrt(2 max_jerk v), so it falls to 0 as
     ///   the speed v does and the stop has no acceleration step.
-    /// It ends when the speed drops below kBrakeStopSpeed or the trajectory end is reached (the
-    /// trajectory is at rest there), with s' = 0.
+    /// It ends, with s' = 0, at the first of: the speed drops below kBrakeStopSpeed; the path
+    /// turns back on itself (P' reverses, as at the turn of a committed trajectory that runs past
+    /// its goal and back: the trajectory itself is at rest there, so the drone stops at the turn
+    /// instead of flying back along the path; the command's acceleration then steps from the
+    /// trajectory's own P'' s'^2 to 0); the trajectory end (at rest there); kBrakeMaxDuration.
     bool SuperPlanner::prepareBrake(const double &now_WT, double &speed, Vec3f &stop_p, double &stop_dist,
-                                    double &stop_time) {
+                                    double &stop_time, Vec3f &traj_end_p, double &traj_left, double &backup_in) {
         Trajectory pos_traj, yaw_traj;
+        double backup_start_TT = NAN;
         cmd_traj_info_.lock();
         const bool empty = cmd_traj_info_.empty();
         if (!empty) {
             pos_traj = cmd_traj_info_.posTraj();
             yaw_traj = cmd_traj_info_.yawTraj();
+            if (cmd_traj_info_.backupTrajAvilibale()) {
+                backup_start_TT = cmd_traj_info_.getBackupTrajStartTT();
+            }
         }
         cmd_traj_info_.unlock();
         if (empty || pos_traj.empty()) {
@@ -445,6 +452,9 @@ namespace super_planner {
         if (s >= total_dur) {
             return false;
         }
+        traj_end_p = pos_traj.getPos(total_dur);
+        traj_left = total_dur - s;
+        backup_in = backup_start_TT - s;  // NaN stays NaN
 
         const double a_max = cfg_.exp_traj_cfg.max_acc;
         const double j_max = cfg_.exp_traj_cfg.max_jerk;
@@ -458,6 +468,7 @@ namespace super_planner {
         const Vec3f start_p = st.col(0);
         stop_dist = 0.0;
         Vec3f last_p = start_p;
+        Vec3f last_B = st.col(1);
         const auto max_steps = static_cast<size_t>(kBrakeMaxDuration / h);
         while (true) {
             pos_traj.getState(s, st);
@@ -466,7 +477,9 @@ namespace super_planner {
             const Vec3f B = st.col(1);
             const double b_norm = B.norm();
             const double v = b_norm * sd;
-            if (v < kBrakeStopSpeed || s >= total_dur || b.s.size() >= max_steps) {
+            const bool turned_back = B.dot(last_B) < 0;
+            last_B = B;
+            if (v < kBrakeStopSpeed || turned_back || s >= total_dur || b.s.size() >= max_steps) {
                 b.s.push_back(s);
                 b.sd.push_back(0.0);
                 b.u.push_back(0.0);

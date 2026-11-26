@@ -130,8 +130,10 @@ namespace super_planner {
         /* Brake: stop along the committed trajectory (prepareBrake / getBrakeCommand) */
         // Integration step [s] of the brake profile; one sample is stored per step.
         static constexpr double kBrakeDt = 0.001;
-        // Below this speed [m/s] the brake ends: the speed is set to 0 and the drone hovers.
-        static constexpr double kBrakeStopSpeed = 0.02;
+        // Below this speed [m/s] the brake ends: the speed is set to 0 and the drone hovers. Near
+        // the stop the deceleration is held at sqrt(2 max_jerk v), so the command's acceleration
+        // steps to 0 by at most sqrt(2 max_jerk kBrakeStopSpeed) (0.49 m/s^2 at max_jerk 120).
+        static constexpr double kBrakeStopSpeed = 0.001;
         // Cap on the profile length [s]. It is never reached with max_acc and max_jerk > 0 (5 m/s
         // at 5 m/s^2 stops in about 1 s); if it were, the profile ends there with speed 0, so the
         // command still ends in a hover, with a velocity step.
@@ -200,9 +202,12 @@ namespace super_planner {
         /// itself is at rest). Returns false, planning nothing, when no trajectory is committed or
         /// it has already been flown to its end (the drone is then at rest at its end). On
         /// success, speed is the speed at the start [m/s], and stop_p, stop_dist [m] and
-        /// stop_time [s] describe where and when the drone stops. Thread-safe.
+        /// stop_time [s] describe where and when the drone stops. For the log, the trajectory it
+        /// replaces: traj_end_p is where it would have ended (at rest), traj_left [s] how much of
+        /// it was still to fly, and backup_in [s] when its backup (stop) segment starts from now
+        /// (< 0: already on it; NaN: it has none). Thread-safe.
         bool prepareBrake(const double &now_WT, double &speed, Vec3f &stop_p, double &stop_dist,
-                          double &stop_time);
+                          double &stop_time, Vec3f &traj_end_p, double &traj_left, double &backup_in);
 
         /// Brake command at the current time from the last prepareBrake. finished is true once
         /// the profile has ended: the command is then the stop point with zero velocity,

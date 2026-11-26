@@ -296,8 +296,19 @@ namespace fsm {
             return;
         }
         const bool hold = flying && near_robot;
-        // While braking the drone is already stopping: a hold request changes nothing.
+        // While braking the drone is already stopping, so a hold request starts nothing new. If
+        // the brake was started by failing replans, it would end by planning from rest toward the
+        // goal that failed; a hold request makes it end as a hold brake instead: hovering at the
+        // stop point (finishBrake). Checked again under goal_mutex_, which finishBrake also holds
+        // when it leaves BRAKE; if the brake has ended meanwhile, the drone is at rest at the stop
+        // point and the request is skipped as any goal near the robot at rest.
         if (hold && state == BRAKE) {
+            std::lock_guard<std::mutex> lck(goal_mutex_);
+            if (machine_state_ == BRAKE && !(brake_for_hold_ && brake_seq_ == goal_seq_)) {
+                brake_for_hold_ = true;
+                brake_seq_ = goal_seq_;
+                ros_ptr_->info(" -- [Fsm] hold request while braking: hovering at the stop point when stopped.");
+            }
             return;
         }
 
@@ -375,9 +386,10 @@ namespace fsm {
         if (machine_state_ != FOLLOW_TRAJ) {
             return false;
         }
-        double speed, stop_dist, stop_time;
-        Vec3f stop_p;
-        if (!planner_ptr_->prepareBrake(ros_ptr_->getSimTime(), speed, stop_p, stop_dist, stop_time)) {
+        double speed, stop_dist, stop_time, traj_left, backup_in;
+        Vec3f stop_p, traj_end_p;
+        if (!planner_ptr_->prepareBrake(ros_ptr_->getSimTime(), speed, stop_p, stop_dist, stop_time,
+                                        traj_end_p, traj_left, backup_in)) {
             return false;
         }
         brake_seq_ = seq;
@@ -385,15 +397,27 @@ namespace fsm {
         if (!changeStateFrom("startBrake", FOLLOW_TRAJ, BRAKE)) {
             return false;
         }
-        ros_ptr_->info(" -- [Fsm] BRAKE ({}): {:.2f} m/s, stops in {:.2f} m and {:.2f} s at [{:.2f}, {:.2f}, {:.2f}].",
-                       trigger, speed, stop_dist, stop_time, stop_p.x(), stop_p.y(), stop_p.z());
+        Vec3f goal_p;
+        {
+            std::lock_guard<std::mutex> glck(goal_mutex_);
+            goal_p = gi_.goal_p;
+        }
+        ros_ptr_->info(" -- [Fsm] BRAKE ({}): {:.2f} m/s, stops in {:.2f} m and {:.2f} s at [{:.2f}, {:.2f}, {:.2f}]. "
+                       "Replaced trajectory: ends at [{:.2f}, {:.2f}, {:.2f}] in {:.2f} s, backup segment in {:.2f} s; "
+                       "goal [{:.2f}, {:.2f}, {:.2f}].",
+                       trigger, speed, stop_dist, stop_time, stop_p.x(), stop_p.y(), stop_p.z(),
+                       traj_end_p.x(), traj_end_p.y(), traj_end_p.z(), traj_left, backup_in,
+                       goal_p.x(), goal_p.y(), goal_p.z());
         return true;
     }
 
     void Fsm::finishBrake() {
         const Vec3f stop_p = planner_ptr_->getHoldPoint();
         bool hover_at_stop = false;
+        hold_cmd_valid_ = true;
         {
+            // The state changes under goal_mutex_ too, so a hold request arriving now either
+            // still sees BRAKE and is applied below (setGoalPosiAndYaw), or sees WAIT_GOAL.
             std::lock_guard<std::mutex> lck(goal_mutex_);
             if (brake_for_hold_ && brake_seq_ == goal_seq_) {
                 gi_.goal_p = stop_p;
@@ -401,9 +425,8 @@ namespace fsm {
                 finish_plan = true;
                 hover_at_stop = true;
             }
+            changeStateFrom("finishBrake", BRAKE, WAIT_GOAL);
         }
-        hold_cmd_valid_ = true;
-        changeStateFrom("finishBrake", BRAKE, WAIT_GOAL);
         ros_ptr_->info(" -- [Fsm] brake done at [{:.2f}, {:.2f}, {:.2f}], {}.", stop_p.x(), stop_p.y(), stop_p.z(),
                        hover_at_stop ? "hovering there" : "planning from rest to the latest goal");
     }
